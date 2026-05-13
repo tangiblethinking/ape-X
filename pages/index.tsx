@@ -21,6 +21,7 @@ import {
   getSearchHistory, saveSearchToHistory, deleteSearchFromHistory, deleteOldestSearch,
   isHistoryFull, getHistoryCount, SearchSnapshot, ExcludedJobSnapshot,
   exportAppData, validateImport, importAppData,
+  getWizardSeen, setWizardSeen,
   SavedJob, AppliedJob, StatusEntry, UploadMeta,
 } from '../lib/storage';
 import {
@@ -93,8 +94,8 @@ async function parseFile(file: File): Promise<string> {
 }
 
 // ── Loading Overlay ────────────────────────────────────────────────────────
-function LoadingOverlay({onCancel,onDismiss,minutesEta=6,dismissOnly=false,customMessage}:{
-  onCancel?:()=>void;onDismiss?:()=>void;minutesEta?:number;dismissOnly?:boolean;customMessage?:string;
+function LoadingOverlay({onCancel,onDismiss,minutesEta=1,dismissOnly=false,customMessage,phaseMessage}:{
+  onCancel?:()=>void;onDismiss?:()=>void;minutesEta?:number;dismissOnly?:boolean;customMessage?:string;phaseMessage?:string;
 }) {
   const [confirm,setConfirm]=useState(false);
   const eta=readyTime(minutesEta);
@@ -104,6 +105,7 @@ function LoadingOverlay({onCancel,onDismiss,minutesEta=6,dismissOnly=false,custo
     window.addEventListener('keydown',onKey);
     return()=>window.removeEventListener('keydown',onKey);
   },[dismissOnly]);
+  const mainMsg=customMessage||phaseMessage||(dismissOnly?'Generation in Progress...':'Results in Progress.');
   return (
     <div style={{position:'fixed',inset:0,background:'#000',zIndex:1000,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:28}}>
       {confirm&&!dismissOnly?(
@@ -119,12 +121,10 @@ function LoadingOverlay({onCancel,onDismiss,minutesEta=6,dismissOnly=false,custo
       ):(
         <>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="https://cdn.dribbble.com/userupload/19917114/file/original-880f3ab68d9bcfe041db6649d5f8003b.gif" alt="Loading" style={{width:220,height:220,objectFit:'contain',borderRadius:8}}/>
+          <div style={{width:220,height:220,borderRadius:8,overflow:'hidden',flexShrink:0}}><img src="https://cdn.dribbble.com/userupload/19917114/file/original-880f3ab68d9bcfe041db6649d5f8003b.gif" alt="Loading" style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/></div>
           <div style={{textAlign:'center'}}>
-            <div style={{fontFamily:'DM Serif Display,serif',fontSize:20,color:'rgba(255,255,255,0.9)',marginBottom:6}}>
-              {dismissOnly?'Generation in Progress...':'Results in Progress.'}
-            </div>
-            {!dismissOnly&&<div style={{fontSize:13,color:'rgba(255,255,255,0.5)'}}>Ready at about {eta}</div>}
+            <div style={{fontFamily:'DM Serif Display,serif',fontSize:20,color:'rgba(255,255,255,0.9)',marginBottom:6}}>{mainMsg}</div>
+            {!dismissOnly&&<div style={{fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:4}}>Ready at about {eta}</div>}
           </div>
           {dismissOnly
             ?<button onClick={onDismiss} style={{background:'none',border:'none',cursor:'pointer',color:'rgba(255,255,255,0.5)',fontSize:13,padding:'8px 16px'}}>dismiss loading screen</button>
@@ -132,6 +132,36 @@ function LoadingOverlay({onCancel,onDismiss,minutesEta=6,dismissOnly=false,custo
           }
         </>
       )}
+    </div>
+  );
+}
+
+// ── Welcome Modal ──────────────────────────────────────────────────────────
+function WelcomeModal({onBegin,onSkip}:{onBegin:()=>void;onSkip:()=>void;}) {
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:2000,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#f5f2ec',borderRadius:8,width:'100%',maxWidth:480,boxShadow:'0 20px 60px rgba(0,0,0,0.3)',overflow:'hidden'}}>
+        <div style={{padding:'36px 32px 28px',textAlign:'center'}}>
+          <div style={{fontSize:11,letterSpacing:'0.2em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:16}}>Welcome</div>
+          <h1 style={{fontFamily:'DM Serif Display,serif',fontSize:28,fontWeight:400,marginBottom:16,lineHeight:1.2}}>Hi, thank you for choosing <em style={{color:'#c8460a',fontStyle:'italic'}}>Ape-X</em> to assist in your job search.</h1>
+          <p style={{fontSize:14,color:'#5a5449',lineHeight:1.75,marginBottom:28}}>
+            Let&apos;s get the right data in the right places. Click <strong>Begin</strong> to be guided through the setup process. All the information you submit is fully editable later.
+          </p>
+          <div style={{display:'flex',flexDirection:'column',gap:10,alignItems:'center'}}>
+            <button onClick={onBegin} style={{width:'100%',maxWidth:280,padding:'13px 24px',background:'#c8460a',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:15,fontFamily:'DM Sans,sans-serif'}}>
+              Begin Setup
+            </button>
+            <button onClick={onSkip} style={{background:'none',border:'none',cursor:'pointer',fontSize:13,color:'#7a7469',textDecoration:'underline',padding:'4px 0'}}>
+              Skip for now
+            </button>
+          </div>
+          {/* Logo below CTA */}
+          <div style={{marginTop:24}}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/Ape-X.png" alt="Ape-X" style={{width:'100%',maxWidth:400,height:'auto',maxHeight:300,objectFit:'contain',display:'block',margin:'0 auto',mixBlendMode:'multiply'}}/>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -893,7 +923,7 @@ function HowToDrawer({onClose}:{onClose:()=>void;}) {
             {num:'3',title:'Running a Job Search',color:'#0f0f0f',items:[
               ['Search Tab','Click "Run Job Search". Instructions are pre-loaded from your saved profile. Edit them only in Settings.'],
               ['Special Instructions','One-off override for this search session only — not saved permanently.'],
-              ['Loading Screen','Shows estimated ready time (~4–6 min). Press Esc to cancel with confirmation.'],
+              ['Loading Screen','Shows estimated ready time (~30–60 sec). Two-pass verified: Pass 1 searches all job boards, Pass 2 verifies each listing on the company\'s own site. Press Esc to cancel.'],
               ['Results','Board tab opens automatically with verified, triple-layer audited roles only.'],
             ]},
             {num:'4',title:'The Job Board',color:'#1a4fd8',items:[
@@ -1269,7 +1299,7 @@ function SaveImportModal({onClose,onImportComplete}:{onClose:()=>void;onImportCo
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     const ts=new Date().toISOString().slice(0,10);
-    a.href=url;a.download=`ux-job-board-${ts}.json`;a.click();
+    a.href=url;a.download=`ape-x-job-board-${ts}.json`;a.click();
     URL.revokeObjectURL(url);
   };
 
@@ -1308,7 +1338,7 @@ function SaveImportModal({onClose,onImportComplete}:{onClose:()=>void;onImportCo
       <div style={{background:'#fff',borderRadius:4,maxWidth:380,width:'100%',padding:28,textAlign:'center',boxShadow:'0 8px 32px rgba(0,0,0,0.2)'}}>
         <AlertTriangle size={36} color="#c8460a" style={{marginBottom:14}}/>
         <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:22,marginBottom:10}}>File is Not Valid</h2>
-        <p style={{fontSize:13,color:'#5a5449',lineHeight:1.7,marginBottom:20}}>This file doesn't appear to be a valid UX Job Board export. No settings were changed.</p>
+        <p style={{fontSize:13,color:'#5a5449',lineHeight:1.7,marginBottom:20}}>This file doesn't appear to be a valid Ape-X Job Board export. No settings were changed.</p>
         <button onClick={()=>setPhase('menu')} style={{padding:'10px 24px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:14}}>Try Again</button>
         <button onClick={onClose} style={{marginLeft:10,padding:'10px 20px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:14}}>Cancel</button>
       </div>
@@ -1383,11 +1413,11 @@ function TermsModal({onClose}:{onClose:()=>void;}) {
   const sections=[
     {
       title:'1. Overview',
-      body:`This application ("UX Job Board," "the App") is a personal productivity tool developed and operated by Ape X LLC ("Developer," "we," "us"). By accessing or using the App, you agree to be bound by these Terms and Conditions. If you do not agree, do not use the App.`,
+      body:`This application ("Ape-X Job Board," "the App") is a personal productivity tool developed and operated by Ape X LLC ("Developer," "we," "us"). By accessing or using the App, you agree to be bound by these Terms and Conditions. If you do not agree, do not use the App.`,
     },
     {
       title:'2. Nature of the Application',
-      body:`The App is a client-side web application designed to assist users in discovering, tracking, and applying to UX leadership job opportunities. The App interfaces with third-party services including the Anthropic Claude API and Serper search API to perform job searches and generate application documents. The Developer is not a recruiter, staffing agency, or employment service of any kind.`,
+      body:`The App is a client-side web application designed to assist users in discovering, tracking, and applying to job opportunities. The App interfaces with third-party services including the Anthropic Claude API and Serper search API to perform job searches and generate application documents. The Developer is not a recruiter, staffing agency, or employment service of any kind.`,
     },
     {
       title:'3. No Employment Guarantee',
@@ -1446,13 +1476,13 @@ function TermsModal({onClose}:{onClose:()=>void;}) {
           <div>
             <div style={{fontSize:10,letterSpacing:'0.18em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:6}}>Legal</div>
             <h1 style={{fontFamily:'DM Serif Display,serif',fontSize:26,fontWeight:400,lineHeight:1.1}}>Terms &amp; Conditions</h1>
-            <p style={{fontSize:12,color:'#7a7469',marginTop:6}}>Ape X LLC · UX Job Board Application · Last updated May 2026</p>
+            <p style={{fontSize:12,color:'#7a7469',marginTop:6}}>Ape X LLC · Ape-X Job Board Application · Last updated May 2026</p>
           </div>
           <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777',padding:4,flexShrink:0}}><X size={22}/></button>
         </div>
         <div style={{padding:'24px 28px 32px',display:'flex',flexDirection:'column',gap:22,overflowY:'auto',flex:1}}>
           <div style={{background:'#fff8f6',border:'1px solid #e8bead',borderRadius:4,padding:'12px 16px',fontSize:12,color:'#6b2200',lineHeight:1.7,flexShrink:0}}>
-            <strong>Please read these Terms carefully.</strong> By using the UX Job Board application, you acknowledge that you have read, understood, and agree to be bound by these Terms and Conditions and all applicable laws.
+            <strong>Please read these Terms carefully.</strong> By using the Ape-X Job Board application, you acknowledge that you have read, understood, and agree to be bound by these Terms and Conditions and all applicable laws.
           </div>
           {sections.map(s=>(
             <div key={s.title}>
@@ -1461,7 +1491,7 @@ function TermsModal({onClose}:{onClose:()=>void;}) {
             </div>
           ))}
           <div style={{borderTop:'1px solid #d6d0c4',paddingTop:18,fontSize:12,color:'#7a7469',lineHeight:1.7}}>
-            These Terms and Conditions were last updated May 2026 and are effective immediately. By continuing to use the UX Job Board application, you agree to these terms in their entirety.
+            These Terms and Conditions were last updated May 2026 and are effective immediately. By continuing to use the Ape-X Job Board application, you agree to these terms in their entirety.
           </div>
         </div>
         <div style={{padding:'16px 28px',borderTop:'1px solid #d6d0c4',display:'flex',justifyContent:'flex-end',flexShrink:0,background:'#fff'}}>
@@ -1487,6 +1517,8 @@ export default function Home() {
   const [showClearBoard,setShowClearBoard]=useState(false);
   const [showWizard,setShowWizard]=useState(false);
   const [showSuccess,setShowSuccess]=useState(false);
+  const [showWelcome,setShowWelcome]=useState(false);
+  const [searchPhase,setSearchPhase]=useState<1|2>(1);
   const [showMobileFAB,setShowMobileFAB]=useState(false);
   const [showHistory,setShowHistory]=useState(false);
   const [showHistoryFull,setShowHistoryFull]=useState(false);
@@ -1504,7 +1536,7 @@ export default function Home() {
   const [generatingJobs]=useState<Record<string,GenerateType>>({});
   const [addStatusModal,setAddStatusModal]=useState<string|null>(null);
   const [filterCat,setFilterCat]=useState('all');
-  const [filterRemote,setFilterRemote]=useState(false);
+  const [filterRemote,setFilterRemote]=useState<boolean|'notremote'>(false);
   const [sortBy,setSortBy]=useState<'salary'|'rating'>('salary');
   const [jobSearchInstr,setJobSearchInstr]=useState('');
   const [resumeInstr,setResumeInstr]=useState('');
@@ -1532,6 +1564,8 @@ export default function Home() {
     setResumeMeta(getUploadedResumeMeta()); setCoverMeta(getUploadedCoverMeta());
     const p=getSavedProfile(); if(p) setProfile(p);
     setSearchHistory(getSearchHistory());
+    // Show welcome modal on first load if wizard never run
+    if(!getWizardSeen()) setShowWelcome(true);
   },[]);
 
   useEffect(()=>{if(tab==='applied')setAppliedJobs(getAppliedJobs());},[tab]);
@@ -1540,21 +1574,42 @@ export default function Home() {
 
   const doRunSearch=async()=>{
     setSearchError('');abortRef.current=false;setSearching(true);
+
     try{
-      const res=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
+      // Pass 1 — search and classify
+      setSearchPhase(1);
+      const res1=await fetch('/api/search-pass1',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({instructions:jobSearchInstr,specialInstructions,apiKeyOverride:anthropicKey,serperKeyOverride:serperKey})});
       if(abortRef.current) return;
-      const data=await res.json();
-      if(!res.ok){setSearchError(data.error||'Search failed.');return;}
-      const live=(data.jobs||[]).filter((j:SavedJob|ExcludedJob)=>!j.excluded) as SavedJob[];
-      const excl=(data.jobs||[]).filter((j:SavedJob|ExcludedJob)=>j.excluded) as ExcludedJob[];
+      const data1=await res1.json();
+      if(!res1.ok){setSearchError(data1.error||'Search failed in Pass 1.');setSearching(false);return;}
+      if(data1.error==='no_results'){setSearchError(data1.message||'No results found.');setSearching(false);return;}
+
+      // Pass 2 — verify and build job cards
+      setSearchPhase(2);
+      const res2=await fetch('/api/search-pass2',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          trusted:data1.trusted||[],
+          aggregators:data1.aggregators||[],
+          instructions:jobSearchInstr,
+          specialInstructions,
+          apiKeyOverride:anthropicKey,
+          serperKeyOverride:serperKey,
+          titlesSearched:data1.titlesSearched||[],
+        })});
+      if(abortRef.current) return;
+      const data2=await res2.json();
+      if(!res2.ok){setSearchError(data2.error||'Search failed in Pass 2.');setSearching(false);return;}
+
+      const live=(data2.jobs||[]).filter((j:SavedJob|ExcludedJob)=>!j.excluded) as SavedJob[];
+      const excl=(data2.jobs||[]).filter((j:SavedJob|ExcludedJob)=>j.excluded) as ExcludedJob[];
       setJobs(live);setExcludedJobs(excl);setSavedJobs(live);
       setLastSearchQuery(jobSearchInstr);
 
       // Auto-save to history
       const snap:SearchSnapshot={
         id:`search-${Date.now()}`,
-        title:profile.targetTitles.slice(0,2).join(' / ')||'UX Leadership Search',
+        title:profile.targetTitles.slice(0,2).join(' / ')||'Job Search',
         timestamp:new Date().toISOString(),
         jobs:live,
         excludedJobs:excl as ExcludedJobSnapshot[],
@@ -1632,7 +1687,7 @@ export default function Home() {
       salaryDisplay:(analysis.salaryDisplay as string)||excl.salaryDisplay||'N/A',
       salaryNote:(analysis.salaryNote as string)||excl.salaryNote||'Estimated',
       rating:(analysis.rating as number)||excl.rating||6,
-      auditLabel:'⚠️ Manually Added',
+      auditLabel:'Manually Added',
       roleSummary:(analysis.roleSummary as string)||excl.roleSummary||'',
       whyYouFit:(analysis.whyYouFit as string[])||excl.whyYouFit||[],
       requirements:(analysis.requirements as string[])||excl.requirements||[],
@@ -1743,12 +1798,23 @@ export default function Home() {
   };
 
   const displayJobs=jobs
-    .filter(j=>filterCat==='all'||j.category===filterCat)
-    .filter(j=>!filterRemote||j.isRemote)
-    .sort((a,b)=>sortBy==='salary'?(b.salaryMax||0)-(a.salaryMax||0):b.rating-a.rating);
-  const srDir=displayJobs.filter(j=>j.category==='senior-director');
-  const dir=displayJobs.filter(j=>j.category==='director');
-  const mgr=displayJobs.filter(j=>j.category==='manager');
+    .filter(j=>{
+      if(filterRemote===true) return j.isRemote;
+      if(filterRemote==='notremote') return !j.isRemote;
+      return true;
+    })
+    .sort((a,b)=>{
+      if(sortBy==='rating') return (b.rating||0)-(a.rating||0)||(b.postedDate||'').localeCompare(a.postedDate||'');
+      if((sortBy as string)==='salaryAsc') return (a.salaryMin||0)-(b.salaryMin||0);
+      if((sortBy as string)==='recent') return (b.postedDate||'').localeCompare(a.postedDate||'');
+      return (b.salaryMax||0)-(a.salaryMax||0);
+    });
+  // Dynamic categories from actual returned data
+  const allCategories=Array.from(new Set(displayJobs.map(j=>j.category||'Other')));
+  const categoryGroups=allCategories.map(cat=>({
+    cat,
+    list:displayJobs.filter(j=>(j.category||'Other')===cat),
+  })).filter(g=>g.list.length>0);
 
   const instrName=(k:'jobSearch'|'resume'|'coverLetter')=>k==='jobSearch'?'Job Search Instructions':k==='resume'?'Resume Instructions':'Cover Letter Instructions';
 
@@ -1770,13 +1836,18 @@ export default function Home() {
         @media(min-width:768px){.mobile-only{display:none!important;}}
       `}</style>
 
-      {searching&&<LoadingOverlay onCancel={()=>{abortRef.current=true;setSearching(false);}} minutesEta={6}/>}
+      {searching&&<LoadingOverlay
+        onCancel={()=>{abortRef.current=true;setSearching(false);}}
+        minutesEta={1}
+        phaseMessage={searchPhase===1?'Sending the apes out to search...':'Verifying listings across company pages...'}
+      />}
       {showHowTo&&<HowToDrawer onClose={()=>setShowHowTo(false)}/>}
       {showSpecial&&<SpecialModal value={specialInstructions} onChange={setSpecialInstructions} onClose={()=>setShowSpecial(false)}/>}
       {showReset&&<ConfirmModal title="Are you certain?" body="This will reset ALL data including saved jobs, applied history, uploaded templates, API keys, profile, and all instructions. This is not reversible." confirmLabel="Reset Everything" onConfirm={doReset} onClose={()=>setShowReset(false)}/>}
       {resetInstrTarget&&<ConfirmModal title="Reset Instructions?" body={`This will reset your ${instrName(resetInstrTarget)} to the profile-based default. This is not reversible.`} confirmLabel="Reset" onConfirm={()=>resetSingleInstr(resetInstrTarget)} onClose={()=>setResetInstrTarget(null)}/>}
       {showWizard&&<SetupWizard initialProfile={profile} initialAnthropicKey={anthropicKey} initialSerperKey={serperKey} onComplete={onWizardComplete} onClose={()=>setShowWizard(false)} onOpenHowTo={()=>setShowHowTo(true)}/>}
       {showSuccess&&<SuccessModal onSearch={()=>{setShowSuccess(false);runSearch();}} onClose={()=>setShowSuccess(false)}/>}
+      {showWelcome&&<WelcomeModal onBegin={()=>{setWizardSeen();setShowWelcome(false);setShowWizard(true);}} onSkip={()=>{setWizardSeen();setShowWelcome(false);}}/>}
       {showMobileFAB&&<MobileFAB instructions={jobSearchInstr} onClose={()=>setShowMobileFAB(false)}/>}
       {generateModal&&<GenerateModal job={generateModal.job} type={generateModal.type} instructions={generateModal.type==='resume'?resumeInstr:coverInstr} apiKey={anthropicKey} onClose={()=>setGenerateModal(null)}/>}
       {addStatusModal&&<AddStatusModal jobId={addStatusModal} onClose={()=>setAddStatusModal(null)}/>}
@@ -1896,7 +1967,7 @@ export default function Home() {
         <div style={{display:'flex',alignItems:'center',gap:4}}>
           <div style={{marginRight:10}}>
             <div style={{fontSize:9,letterSpacing:'0.18em',textTransform:'uppercase',color:'#c8460a',fontWeight:700}}>UX Leadership</div>
-            <div style={{fontFamily:'DM Serif Display,serif',fontSize:15,color:'#f5f2ec',lineHeight:1}}>Job Board</div>
+            <div style={{fontFamily:'DM Serif Display,serif',fontSize:15,color:'#f5f2ec',lineHeight:1}}>Ape-X</div>
           </div>
           <div style={{width:1,height:30,background:'rgba(255,255,255,0.1)',marginRight:6}}/>
           {([
@@ -1927,22 +1998,47 @@ export default function Home() {
         {tab==='search'&&(
           <main className="main-pad" style={{maxWidth:680,margin:'0 auto',padding:'40px 20px 60px'}}>
             <div style={{marginBottom:28}}>
-              <div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:8}}>UX Leadership Job Board</div>
+              <div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:8}}>Ape-X Job Board</div>
               <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:16,flexWrap:'wrap'}}>
                 <h1 style={{fontFamily:'DM Serif Display,serif',fontSize:30,fontWeight:400,marginBottom:10}}>Find Your Next Role</h1>
                 <button onClick={()=>setShowWizard(true)} style={{display:'flex',alignItems:'center',gap:6,background:'#0f0f0f',color:'#f5f2ec',border:'none',borderRadius:4,padding:'10px 16px',fontSize:13,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0}}>
                   <Wand2 size={14}/>Launch Guided Experience
                 </button>
               </div>
-              <p style={{fontSize:14,color:'#7a7469',lineHeight:1.7}}>Upload your resume and cover letter templates, then run a live triple-layer audited job search.</p>
+              <p style={{fontSize:14,color:'#7a7469',lineHeight:1.7}}>Upload your resume and cover letter, then run a live two-pass verified job search.</p>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:14,marginBottom:26}}>
               <UploadCard type="resume" meta={resumeMeta} onUpload={f=>handleUpload(f,'resume')}/>
               <UploadCard type="cover" meta={coverMeta} onUpload={f=>handleUpload(f,'cover')}/>
             </div>
             {searchError&&<div style={{background:'#f5d5c8',color:'#6b2200',padding:'11px 14px',borderRadius:4,marginBottom:18,fontSize:13,display:'flex',gap:8,alignItems:'center'}}><AlertTriangle size={14}/>{searchError}</div>}
+
+            {/* Hard block — missing API keys */}
+            {(!anthropicKey||!serperKey)&&(
+              <div style={{background:'#fff8f6',border:'1px solid #e8bead',borderRadius:4,padding:'12px 16px',marginBottom:16,fontSize:13,color:'#6b2200',display:'flex',alignItems:'flex-start',gap:10}}>
+                <AlertTriangle size={15} color="#c8460a" style={{flexShrink:0,marginTop:1}}/>
+                <div>
+                  <strong>API keys required to search.</strong> Missing:{' '}
+                  {!anthropicKey&&<span>Anthropic key</span>}
+                  {!anthropicKey&&!serperKey&&<span> · </span>}
+                  {!serperKey&&<span>Serper key</span>}
+                  {' — '}
+                  <button onClick={()=>setTab('settings')} style={{background:'none',border:'none',cursor:'pointer',color:'#c8460a',fontWeight:700,fontSize:13,padding:0,textDecoration:'underline'}}>Go to Settings</button>
+                </div>
+              </div>
+            )}
+
+            {/* Soft warn — missing titles */}
+            {anthropicKey&&serperKey&&(!profile.targetTitles.length||jobSearchInstr.includes('[Complete'))&&(
+              <div style={{background:'#f2e8cb',border:'1px solid #e8d5a0',borderRadius:4,padding:'10px 14px',marginBottom:14,fontSize:12,color:'#7a5a1a',display:'flex',alignItems:'center',gap:8}}>
+                <AlertTriangle size={13} color="#b5882e"/>
+                No job titles configured — search may return broad results.{' '}
+                <button onClick={()=>setShowWizard(true)} style={{background:'none',border:'none',cursor:'pointer',color:'#b5882e',fontWeight:700,fontSize:12,padding:0,textDecoration:'underline'}}>Run Setup Wizard</button>
+              </div>
+            )}
+
             <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-              <button onClick={runSearch} style={{display:'flex',alignItems:'center',gap:7,background:'#c8460a',color:'#fff',border:'none',borderRadius:4,padding:'12px 26px',fontSize:14,fontWeight:700,cursor:'pointer'}}>
+              <button onClick={runSearch} disabled={!anthropicKey||!serperKey} style={{display:'flex',alignItems:'center',gap:7,background:(!anthropicKey||!serperKey)?'#ccc':'#c8460a',color:'#fff',border:'none',borderRadius:4,padding:'12px 26px',fontSize:14,fontWeight:700,cursor:(!anthropicKey||!serperKey)?'not-allowed':'pointer',opacity:(!anthropicKey||!serperKey)?0.7:1}}>
                 <Search size={16}/>Run Job Search
               </button>
               {specialInstructions&&<span style={{fontSize:11,background:'#f2e8cb',color:'#b5882e',padding:'3px 10px',borderRadius:3,fontWeight:700}}>Special active</span>}
@@ -1950,7 +2046,7 @@ export default function Home() {
                 <Sparkles size={13}/>Special Instructions
               </button>
             </div>
-            <p style={{fontSize:11,color:'#7a7469',marginTop:10}}>~4–6 min · triple-layer audit · edit instructions in Settings</p>
+            <p style={{fontSize:11,color:'#7a7469',marginTop:10}}>~30–60 sec · two-pass verified · edit instructions in Settings</p>
             <button className="mobile-only" onClick={()=>setShowMobileFAB(true)} style={{position:'fixed',bottom:80,right:24,zIndex:100,width:50,height:50,borderRadius:'50%',background:'#0f0f0f',color:'#fff',border:'none',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 4px 16px rgba(0,0,0,0.3)',cursor:'pointer'}}>
               <FileText size={20}/>
             </button>
@@ -1961,11 +2057,14 @@ export default function Home() {
         {tab==='board'&&(
           <main className="main-pad" style={{maxWidth:1100,margin:'0 auto',padding:'26px 16px 60px'}}>
             {jobs.length===0?(
-              <div style={{textAlign:'center',padding:'60px 24px',color:'#7a7469'}}>
-                <Briefcase size={44} style={{opacity:0.3,marginBottom:14}}/>
-                <h3 style={{fontFamily:'DM Serif Display,serif',fontSize:21,color:'#0f0f0f',marginBottom:8}}>No jobs loaded yet</h3>
-                <p style={{fontSize:14,lineHeight:1.7,maxWidth:340,margin:'0 auto 22px'}}>Run a job search from the Search tab to populate the board.</p>
-                <button onClick={()=>setTab('search')} style={{padding:'10px 20px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:14}}>Go to Search</button>
+              <div style={{textAlign:'center',padding:'60px 24px'}}>
+                <div style={{marginBottom:20}}>
+                  <p style={{fontSize:16,fontWeight:700,color:'#0f0f0f',marginBottom:8,fontFamily:'DM Serif Display,serif'}}>Our apes didn&apos;t forage any jobs with these requirements.</p>
+                  <p style={{fontSize:14,color:'#5a5449',lineHeight:1.7,marginBottom:20}}>Send them out again by adjusting your settings.</p>
+                  <button onClick={()=>setShowWizard(true)} style={{padding:'11px 22px',background:'#c8460a',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:14,marginBottom:24}}>Run Search Wizard</button>
+                </div>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/Ape-X.png" alt="Ape-X" style={{width:'100%',maxWidth:200,height:'auto',objectFit:'contain',mixBlendMode:'multiply'}}/>
               </div>
             ):(
               <>
@@ -1976,30 +2075,37 @@ export default function Home() {
                 </div>
                 <div style={{background:'#ede9e0',border:'1px solid #d6d0c4',padding:'10px 14px',borderRadius:4,marginBottom:22,display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
                   <Filter size={12} style={{color:'#7a7469',marginRight:2}}/>
-                  {[['all',`All (${jobs.length})`],['senior-director','Sr. Dir'],['director','Director'],['manager','Manager']].map(([val,label])=>(
-                    <button key={val} onClick={()=>setFilterCat(val)} style={{background:filterCat===val?'#0f0f0f':'transparent',color:filterCat===val?'#f5f2ec':'#7a7469',border:`1px solid ${filterCat===val?'#0f0f0f':'#d6d0c4'}`,borderRadius:3,padding:'4px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>{label}</button>
+                  <span style={{fontSize:11,color:'#7a7469',fontWeight:600,marginRight:4}}>Location:</span>
+                  {([['false','All'],['true','Remote'],['notremote','Not Remote']] as [string,string][]).map(([val,label])=>(
+                    <button key={val} onClick={()=>setFilterRemote(val==='false'?false:val==='true'?true:'notremote')} style={{background:String(filterRemote)===val?'#0f0f0f':'transparent',color:String(filterRemote)===val?'#f5f2ec':'#7a7469',border:`1px solid ${String(filterRemote)===val?'#0f0f0f':'#d6d0c4'}`,borderRadius:3,padding:'4px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>{label}</button>
                   ))}
-                  <button onClick={()=>setFilterRemote(!filterRemote)} style={{background:filterRemote?'#0f0f0f':'transparent',color:filterRemote?'#f5f2ec':'#7a7469',border:`1px solid ${filterRemote?'#0f0f0f':'#d6d0c4'}`,borderRadius:3,padding:'4px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>Remote</button>
                   <div style={{width:1,height:18,background:'#d6d0c4',margin:'0 2px'}}/>
                   <SortDesc size={12} style={{color:'#7a7469'}}/>
-                  {[['salary','Salary'],['rating','Rating']].map(([val,label])=>(
+                  <span style={{fontSize:11,color:'#7a7469',fontWeight:600,marginRight:2}}>Sort:</span>
+                  {([['rating','Best Fit'],['salary','Salary ↓'],['salaryAsc','Salary ↑'],['recent','Recent']] as [string,string][]).map(([val,label])=>(
                     <button key={val} onClick={()=>setSortBy(val as 'salary'|'rating')} style={{background:sortBy===val?'#0f0f0f':'transparent',color:sortBy===val?'#f5f2ec':'#7a7469',border:`1px solid ${sortBy===val?'#0f0f0f':'#d6d0c4'}`,borderRadius:3,padding:'4px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>{label}</button>
                   ))}
                   <div style={{marginLeft:'auto'}}>
                     <button onClick={()=>setShowClearBoard(true)} style={{display:'flex',alignItems:'center',gap:4,padding:'4px 10px',border:'1px solid #d6d0c4',borderRadius:3,background:'transparent',cursor:'pointer',fontSize:12,color:'#7a7469'}}><Trash2 size={11}/>Clear</button>
                   </div>
                 </div>
-                {[{label:'Senior Director',list:srDir},{label:'Director',list:dir},{label:'Manager',list:mgr}].map(section=>section.list.length>0&&(
-                  <section key={section.label} style={{marginBottom:32}}>
-                    <div style={{display:'flex',alignItems:'baseline',gap:10,marginBottom:12,borderBottom:'2px solid #0f0f0f',paddingBottom:7}}>
-                      <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:20}}>{section.label}</h2>
-                      <span style={{fontSize:12,color:'#7a7469'}}>{section.list.length} roles</span>
-                    </div>
-                    <div style={{display:'grid',gap:10}}>
-                      {section.list.map(j=><JobCard key={j.id} job={j} applied={isJobApplied(j.id)} generatingType={generatingJobs[j.id]||null} onGenerate={(job,type)=>setGenerateModal({job,type})} onReturnToExcluded={returnToExcluded}/>)}
-                    </div>
-                  </section>
-                ))}
+                {displayJobs.length===0&&jobs.length>0?(
+                  <div style={{textAlign:'center',padding:'40px 24px',color:'#7a7469'}}>
+                    <p style={{fontSize:14}}>No jobs match this filter.</p>
+                  </div>
+                ):(
+                  categoryGroups.map(group=>(
+                    <section key={group.cat} style={{marginBottom:32}}>
+                      <div style={{display:'flex',alignItems:'baseline',gap:10,marginBottom:12,borderBottom:'2px solid #0f0f0f',paddingBottom:7}}>
+                        <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:20}}>{group.cat}</h2>
+                        <span style={{fontSize:12,color:'#7a7469'}}>{group.list.length} {group.list.length===1?'role':'roles'}</span>
+                      </div>
+                      <div style={{display:'grid',gap:10}}>
+                        {group.list.map(j=><JobCard key={j.id} job={j} applied={isJobApplied(j.id)} generatingType={generatingJobs[j.id]||null} onGenerate={(job,type)=>setGenerateModal({job,type})} onReturnToExcluded={returnToExcluded}/>)}
+                      </div>
+                    </section>
+                  ))
+                )}
                 {excludedJobs.length>0&&(
                   <div style={{marginTop:36,padding:18,background:'#fff8f6',border:'1px solid #e8bead',borderRadius:4}}>
                     <h3 style={{fontFamily:'DM Serif Display,serif',fontSize:17,fontWeight:400,marginBottom:12,color:'#6b2200',display:'flex',alignItems:'center',gap:7}}>
