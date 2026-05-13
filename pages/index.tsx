@@ -1,0 +1,2195 @@
+import { useState, useEffect, useRef } from 'react';
+import {
+  Search, Briefcase, CheckSquare, Settings, HelpCircle, RotateCcw,
+  X, ChevronDown, ChevronUp, Upload, FileText, Mail, Trash2,
+  Plus, ExternalLink, AlertTriangle, CheckCircle, Copy,
+  Sparkles, Building2, MapPin, DollarSign, Star, Flag,
+  ArrowRight, Clock, Filter, SortDesc, PlusCircle, User,
+  Link, ChevronRight, ChevronLeft, Wand2, Copyright,
+} from 'lucide-react';
+import {
+  getSavedJobs, setSavedJobs, clearSavedJobs,
+  getAppliedJobs, markDocGenerated, addStatusToJob,
+  deleteAppliedJob, clearAppliedJobs, isJobApplied,
+  getSavedInstructions, saveInstructions,
+  getLocalApiKey, setLocalApiKey,
+  getLocalSerperKey, setLocalSerperKey,
+  setLastSearchQuery,
+  setUploadedResume, getUploadedResume, getUploadedResumeMeta,
+  setUploadedCover, getUploadedCover, getUploadedCoverMeta,
+  clearAllStorage, getSavedProfile, saveProfile,
+  getSearchHistory, saveSearchToHistory, deleteSearchFromHistory, deleteOldestSearch,
+  isHistoryFull, getHistoryCount, SearchSnapshot, ExcludedJobSnapshot,
+  exportAppData, validateImport, importAppData,
+  SavedJob, AppliedJob, StatusEntry, UploadMeta,
+} from '../lib/storage';
+import {
+  DEFAULT_PROFILE, buildJobSearchInstructions,
+  buildResumeInstructions, buildCoverLetterInstructions,
+  DEFAULT_JOB_SEARCH_INSTRUCTIONS, DEFAULT_RESUME_INSTRUCTIONS,
+  DEFAULT_COVER_LETTER_INSTRUCTIONS, CandidateProfile,
+} from '../lib/instructions';
+
+type Tab = 'search' | 'board' | 'applied' | 'settings';
+type GenerateType = 'resume' | 'coverLetter';
+
+interface ExcludedJob {
+  id: string; company: string; title: string;
+  layerFailed: string; reason: string; excluded: true;
+  category?: string; isRemote?: boolean; isHybrid?: boolean;
+  industry?: string[]; salaryMin?: number; salaryMax?: number;
+  salaryDisplay?: string; salaryNote?: string; rating?: number;
+  auditLabel?: string; roleSummary?: string; whyYouFit?: string[];
+  requirements?: string[]; companyInfo?: string; goldFlags?: string[];
+  redFlags?: string[]; applyUrl?: string; careersUrl?: string;
+  aboutUrl?: string; jobDescUrl?: string; postedDate?: string;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function readyTime(mins: number): string {
+  const d = new Date(Date.now() + mins * 60000);
+  let h = d.getHours(), m = d.getMinutes();
+  const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+  return `${h}:${String(m).padStart(2,'0')} ${ap}`;
+}
+function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
+    +' at '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+}
+function statusColor(s: StatusEntry['status']) {
+  return s==='applied'?'#1a4fd8':s==='interview'?'#b5882e':s==='offer'?'#2a6644':'#c8460a';
+}
+function statusBg(s: StatusEntry['status']) {
+  return s==='applied'?'#dde8f5':s==='interview'?'#f2e8cb':s==='offer'?'#d6ede2':'#f5d5c8';
+}
+function fmtSalary(n: number): string {
+  if (n === 0) return 'Volunteer';
+  return `$${(n/1000).toFixed(0)}K`;
+}
+async function parseFile(file: File): Promise<string> {
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (ext==='html'||ext==='htm') return await file.text();
+  if (ext==='docx') {
+    const mammoth = (await import('mammoth')).default;
+    const buf = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({arrayBuffer:buf});
+    return result.value;
+  }
+  if (ext==='pdf') {
+    const pdfjsLib = await import('pdfjs-dist');
+    pdfjsLib.GlobalWorkerOptions.workerSrc=`//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+    let text = '';
+    for (let i=1;i<=pdf.numPages;i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      text += (content.items as Array<{str?:string}>).map(item=>item.str||'').join(' ')+'\n';
+    }
+    return text;
+  }
+  throw new Error('Unsupported file type. Use HTML, DOCX, or text-based PDF.');
+}
+
+// ── Loading Overlay ────────────────────────────────────────────────────────
+function LoadingOverlay({onCancel,onDismiss,minutesEta=6,dismissOnly=false,customMessage}:{
+  onCancel?:()=>void;onDismiss?:()=>void;minutesEta?:number;dismissOnly?:boolean;customMessage?:string;
+}) {
+  const [confirm,setConfirm]=useState(false);
+  const eta=readyTime(minutesEta);
+  useEffect(()=>{
+    if(dismissOnly) return;
+    function onKey(e:KeyboardEvent){if(e.key==='Escape')setConfirm(true);}
+    window.addEventListener('keydown',onKey);
+    return()=>window.removeEventListener('keydown',onKey);
+  },[dismissOnly]);
+  return (
+    <div style={{position:'fixed',inset:0,background:'#000',zIndex:1000,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:28}}>
+      {confirm&&!dismissOnly?(
+        <div style={{textAlign:'center',maxWidth:340,padding:'0 24px'}}>
+          <AlertTriangle size={36} color="#c8460a" style={{marginBottom:16}}/>
+          <h2 style={{color:'#fff',fontFamily:'DM Serif Display,serif',fontSize:22,marginBottom:12}}>Cancel Search?</h2>
+          <p style={{color:'rgba(255,255,255,0.6)',fontSize:14,marginBottom:28,lineHeight:1.6}}>All search progress will be lost.</p>
+          <div style={{display:'flex',gap:12,justifyContent:'center'}}>
+            <button onClick={onCancel} style={{background:'#c8460a',color:'#fff',border:'none',borderRadius:4,padding:'10px 20px',fontWeight:700,cursor:'pointer',fontSize:13}}>Yes, cancel</button>
+            <button onClick={()=>setConfirm(false)} style={{background:'rgba(255,255,255,0.1)',color:'#fff',border:'1px solid rgba(255,255,255,0.2)',borderRadius:4,padding:'10px 20px',fontWeight:600,cursor:'pointer',fontSize:13}}>Keep going</button>
+          </div>
+        </div>
+      ):(
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="https://cdn.dribbble.com/userupload/19917114/file/original-880f3ab68d9bcfe041db6649d5f8003b.gif" alt="Loading" style={{width:220,height:220,objectFit:'contain',borderRadius:8}}/>
+          <div style={{textAlign:'center'}}>
+            <div style={{fontFamily:'DM Serif Display,serif',fontSize:20,color:'rgba(255,255,255,0.9)',marginBottom:6}}>
+              {dismissOnly?'Generation in Progress...':'Results in Progress.'}
+            </div>
+            {!dismissOnly&&<div style={{fontSize:13,color:'rgba(255,255,255,0.5)'}}>Ready at about {eta}</div>}
+          </div>
+          {dismissOnly
+            ?<button onClick={onDismiss} style={{background:'none',border:'none',cursor:'pointer',color:'rgba(255,255,255,0.5)',fontSize:13,padding:'8px 16px'}}>dismiss loading screen</button>
+            :<button onClick={()=>setConfirm(true)} style={{background:'none',border:'none',cursor:'pointer',color:'rgba(255,255,255,0.3)',fontSize:12,padding:'8px 16px'}}>(Esc to cancel progress)</button>
+          }
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Confirm Modal (generic) ────────────────────────────────────────────────
+function ConfirmModal({title,body,confirmLabel='Confirm',danger=true,onConfirm,onClose}:{
+  title:string;body:string;confirmLabel?:string;danger?:boolean;onConfirm:()=>void;onClose:()=>void;
+}) {
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:800,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:400,boxShadow:'0 8px 32px rgba(0,0,0,0.2)',padding:28,textAlign:'center'}}>
+        <AlertTriangle size={38} color="#c8460a" style={{marginBottom:14}}/>
+        <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:22,marginBottom:10}}>{title}</h2>
+        <p style={{fontSize:13,color:'#5a5449',lineHeight:1.7,marginBottom:22}}>{body}</p>
+        <div style={{display:'flex',gap:12,justifyContent:'center'}}>
+          <button onClick={onConfirm} style={{display:'flex',alignItems:'center',gap:6,padding:'10px 20px',background:danger?'#c8460a':'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13}}>
+            {confirmLabel}
+          </button>
+          <button onClick={onClose} style={{padding:'10px 20px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Success Modal ──────────────────────────────────────────────────────────
+function SuccessModal({onSearch,onClose}:{onSearch:()=>void;onClose:()=>void;}) {
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:800,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:420,boxShadow:'0 8px 32px rgba(0,0,0,0.2)',padding:32,textAlign:'center'}}>
+        <CheckCircle size={44} color="#2a6644" fill="#d6ede2" style={{marginBottom:16}}/>
+        <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:10}}>Instructions Saved.</h2>
+        <p style={{fontSize:14,color:'#5a5449',lineHeight:1.7,marginBottom:24}}>Ready to search.</p>
+        <div style={{display:'flex',gap:12,justifyContent:'center'}}>
+          <button onClick={onSearch} style={{display:'flex',alignItems:'center',gap:6,padding:'12px 24px',background:'#c8460a',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:14}}>
+            <Search size={15}/> Search Now
+          </button>
+          <button onClick={onClose} style={{padding:'12px 20px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:14}}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Salary Slider ──────────────────────────────────────────────────────────
+function SalarySlider({min,max,onChange}:{min:number;max:number;onChange:(min:number,max:number)=>void;}) {
+  const STEP=10000, MIN_VAL=0, MAX_VAL=500000;
+  return (
+    <div style={{padding:'8px 0'}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:12}}>
+        <div style={{textAlign:'center'}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#7a7469',marginBottom:4}}>Minimum</div>
+          <div style={{fontSize:18,fontWeight:700,color:'#0f0f0f',fontFamily:'DM Serif Display,serif'}}>{fmtSalary(min)}</div>
+        </div>
+        <div style={{textAlign:'center'}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#7a7469',marginBottom:4}}>Maximum</div>
+          <div style={{fontSize:18,fontWeight:700,color:'#0f0f0f',fontFamily:'DM Serif Display,serif'}}>{fmtSalary(max)}</div>
+        </div>
+      </div>
+      <div style={{marginBottom:8}}>
+        <label style={{fontSize:11,color:'#7a7469',display:'block',marginBottom:4}}>Min salary</label>
+        <input type="range" min={MIN_VAL} max={MAX_VAL} step={STEP} value={min}
+          onChange={e=>{const v=Number(e.target.value);if(v<=max)onChange(v,max);}}
+          style={{width:'100%',accentColor:'#c8460a'}}/>
+      </div>
+      <div>
+        <label style={{fontSize:11,color:'#7a7469',display:'block',marginBottom:4}}>Max salary</label>
+        <input type="range" min={MIN_VAL} max={MAX_VAL} step={STEP} value={max}
+          onChange={e=>{const v=Number(e.target.value);if(v>=min)onChange(min,v);}}
+          style={{width:'100%',accentColor:'#c8460a'}}/>
+      </div>
+      {min===0&&<p style={{fontSize:11,color:'#b5882e',marginTop:8}}>$0 = Volunteer / Internship included</p>}
+    </div>
+  );
+}
+
+
+// ── Setup Wizard ───────────────────────────────────────────────────────────
+function SetupWizard({initialProfile,initialAnthropicKey,initialSerperKey,onComplete,onClose,onOpenHowTo}:{
+  initialProfile:CandidateProfile;
+  initialAnthropicKey:string;
+  initialSerperKey:string;
+  onComplete:(p:CandidateProfile,anthKey:string,serpKey:string)=>void;
+  onClose:()=>void;
+  onOpenHowTo:()=>void;
+}) {
+  const [step,setStep]=useState(0);
+  const [profile,setProfile]=useState<CandidateProfile>({...initialProfile});
+  const [wizAnthropicKey,setWizAnthropicKey]=useState(initialAnthropicKey);
+  const [wizSerperKey,setWizSerperKey]=useState(initialSerperKey);
+  const [uploading,setUploading]=useState(false);
+  const [uploadMsg,setUploadMsg]=useState('');
+  const [extracting,setExtracting]=useState(false);
+  const [extractedFields,setExtractedFields]=useState<Set<string>>(new Set());
+  const [newLinkTitle,setNewLinkTitle]=useState('');
+  const [newLinkUrl,setNewLinkUrl]=useState('');
+  const [linkStep,setLinkStep]=useState<'title'|'url'>('title');
+  const [newTitle,setNewTitle]=useState('');
+  const [newLocation,setNewLocation]=useState('');
+  const [newSector,setNewSector]=useState('');
+  const fileRef=useRef<HTMLInputElement>(null);
+  const coverFileRef=useRef<HTMLInputElement>(null);
+  const [coverUploadMsg,setCoverUploadMsg]=useState('');
+  const existingResumeMeta=getUploadedResumeMeta();
+  const existingCoverMeta=getUploadedCoverMeta();
+  const [wizResumeMeta,setWizResumeMeta]=useState(existingResumeMeta);
+  const [wizCoverMeta,setWizCoverMeta]=useState(existingCoverMeta);
+  // Store raw resume text for extraction on Next
+  const resumeTextRef=useRef<string>('');
+
+  const TOTAL_STEPS=7;
+  const pct=Math.round(((step)/TOTAL_STEPS)*100);
+
+  const anthropicValid=wizAnthropicKey.startsWith('sk-ant-')&&wizAnthropicKey.length>20;
+  const serperValid=wizSerperKey.length>10;
+  const keysComplete=anthropicValid&&serperValid;
+
+  const upd=(k:keyof CandidateProfile,v:CandidateProfile[keyof CandidateProfile])=>
+    setProfile(p=>({...p,[k]:v}));
+
+  // Store resume file on upload but do NOT extract yet
+  const handleResumeUpload=async(file:File)=>{
+    setUploading(true);
+    try{
+      const text=await parseFile(file);
+      resumeTextRef.current=text;
+      const ext=file.name.split('.').pop()?.toLowerCase() as UploadMeta['fileType'];
+      const meta={filename:file.name,uploadedAt:new Date().toISOString(),fileType:ext};
+      setUploadedResume(text,meta);
+      setWizResumeMeta(meta);
+      setUploadMsg('✓ Resume ready');
+    }catch(e:unknown){setUploadMsg(e instanceof Error?e.message:'Upload failed');}
+    finally{setUploading(false);}
+  };
+
+  // Extract on Next click at resume step — runs extraction then advances
+  const extractAndAdvance=async()=>{
+    const text=resumeTextRef.current||getUploadedResume();
+    if(!text){setStep(s=>s+1);return;}
+    setExtracting(true);
+    try{
+      const res=await fetch('/api/extract-profile',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({resumeText:text,apiKeyOverride:wizAnthropicKey}),
+      });
+      if(res.ok){
+        const data=await res.json();
+        const ex=data.profile||{};
+        const found=new Set<string>();
+        // Map all extracted fields, track which ones were populated
+        setProfile(p=>{
+          const next={...p};
+          const trySet=(key:keyof CandidateProfile,val:unknown)=>{
+            if(val&&(Array.isArray(val)?val.length>0:String(val).trim())){
+              (next as Record<string,unknown>)[key]=val;
+              found.add(key);
+            }
+          };
+          trySet('name',ex.name);
+          trySet('email',ex.email);
+          trySet('phone',ex.phone);
+          trySet('linkedinUrl',ex.linkedinUrl);
+          trySet('portfolioUrl',ex.portfolioUrl);
+          trySet('mostRecentRole',ex.mostRecentRole);
+          trySet('mostRecentEmployer',ex.mostRecentEmployer);
+          trySet('yearsExperience',ex.yearsExperience);
+          trySet('coreStrengths',ex.coreStrengths);
+          trySet('discipline',ex.discipline);
+          trySet('targetTitles',ex.targetTitles);
+          trySet('targetSectors',ex.targetSectors);
+          if(ex.salaryMin>0){next.salaryMin=ex.salaryMin;found.add('salaryMin');}
+          if(ex.salaryMax>0){next.salaryMax=ex.salaryMax;found.add('salaryMax');}
+          // Additional links from resume
+          if(ex.additionalLinks?.length){
+            const existing=p.additionalLinks||[];
+            const merged=[...existing,...ex.additionalLinks.filter((l:{url:string})=>!existing.find((e:{url:string})=>e.url===l.url))];
+            next.additionalLinks=merged;
+            if(merged.length>existing.length) found.add('additionalLinks');
+          }
+          return next;
+        });
+        setExtractedFields(found);
+      }
+    }catch{/* silent fail — user fills manually */}
+    finally{setExtracting(false);}
+    setStep(s=>s+1);
+  };
+
+  const addLink=()=>{
+    if(linkStep==='title'){if(newLinkTitle.trim())setLinkStep('url');}
+    else{
+      if(newLinkUrl.trim()){
+        upd('additionalLinks',[...profile.additionalLinks,{title:newLinkTitle.trim(),url:newLinkUrl.trim()}]);
+        setNewLinkTitle('');setNewLinkUrl('');setLinkStep('title');
+      }
+    }
+  };
+  const removeLink=(i:number)=>upd('additionalLinks',profile.additionalLinks.filter((_,idx)=>idx!==i));
+  const addTargetTitle=()=>{
+    if(newTitle.trim()&&!profile.targetTitles.includes(newTitle.trim())){
+      upd('targetTitles',[...profile.targetTitles,newTitle.trim()]);setNewTitle('');
+    }
+  };
+  const removeTargetTitle=(t:string)=>upd('targetTitles',profile.targetTitles.filter(x=>x!==t));
+  const addLocation=()=>{
+    if(newLocation.trim()&&!profile.locations.includes(newLocation.trim())){
+      upd('locations',[...profile.locations,newLocation.trim()]);setNewLocation('');
+    }
+  };
+  const removeLocation=(l:string)=>upd('locations',profile.locations.filter(x=>x!==l));
+  const toggleWorkType=(wt:string)=>{
+    const cur=profile.workTypes;
+    upd('workTypes',cur.includes(wt)?cur.filter(x=>x!==wt):[...cur,wt]);
+  };
+
+  const finish=()=>{
+    setLocalApiKey(wizAnthropicKey);
+    setLocalSerperKey(wizSerperKey);
+    saveProfile(profile);
+    const js=buildJobSearchInstructions(profile);
+    const res=buildResumeInstructions(profile);
+    const cv=buildCoverLetterInstructions(profile);
+    saveInstructions({jobSearch:js,resume:res,coverLetter:cv});
+    onComplete(profile,wizAnthropicKey,wizSerperKey);
+  };
+
+  const inp=(style?:React.CSSProperties):React.CSSProperties=>({
+    width:'100%',padding:'10px 12px',border:'1.5px solid #d6d0c4',
+    borderRadius:4,fontFamily:'DM Sans,sans-serif',fontSize:14,outline:'none',...style
+  });
+  const lbl:React.CSSProperties={fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:6,display:'block'};
+
+  // Key field with inline validation indicator
+  const KeyField=({label,value,onChange,valid,placeholder,note}:{
+    label:string;value:string;onChange:(v:string)=>void;
+    valid:boolean;placeholder:string;note:string;
+  })=>(
+    <div style={{marginBottom:18}}>
+      <label style={lbl}>{label}</label>
+      <div style={{position:'relative'}}>
+        <input
+          type="text"
+          value={value}
+          onChange={e=>onChange(e.target.value)}
+          placeholder={placeholder}
+          style={{...inp(),paddingRight:40,fontFamily:'monospace',fontSize:13,
+            borderColor:value.length>0?(valid?'#2a6644':'#c8460a'):'#d6d0c4'}}
+        />
+        {value.length>0&&(
+          <div style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)'}}>
+            {valid
+              ?<CheckCircle size={16} color="#2a6644" fill="#d6ede2"/>
+              :<AlertTriangle size={16} color="#c8460a"/>
+            }
+          </div>
+        )}
+      </div>
+      {value.length>0&&!valid&&(
+        <div style={{fontSize:11,color:'#c8460a',marginTop:4,display:'flex',alignItems:'center',gap:4}}>
+          <AlertTriangle size={11}/>{note}
+        </div>
+      )}
+      {value.length>0&&valid&&(
+        <div style={{fontSize:11,color:'#2a6644',marginTop:4,display:'flex',alignItems:'center',gap:4}}>
+          <CheckCircle size={11}/>Key format looks valid
+        </div>
+      )}
+    </div>
+  );
+
+  const stepContent=()=>{
+    switch(step){
+      // ── STEP 0: API KEYS ──────────────────────────────────────────────────
+      case 0: return (
+        <div>
+          <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:6}}>Set Up Your API Keys</h2>
+          <p style={{fontSize:14,color:'#5a5449',lineHeight:1.7,marginBottom:4}}>
+            This app uses two external APIs to find and generate your job application materials. Both are required.
+          </p>
+          <button onClick={onOpenHowTo} style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12,color:'#1a4fd8',background:'none',border:'none',cursor:'pointer',padding:'0 0 16px 0',textDecoration:'underline'}}>
+            <HelpCircle size={13}/>See full setup guide in How to Use
+          </button>
+
+          {/* Anthropic card */}
+          <div style={{background:'#f5f2ec',borderRadius:6,padding:18,marginBottom:16,border:'1px solid #e8e4da'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:'#0f0f0f',marginBottom:2}}>1. Anthropic API Key</div>
+                <div style={{fontSize:11,color:'#7a7469'}}>Powers AI search processing and document generation</div>
+              </div>
+              <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
+                style={{display:'flex',alignItems:'center',gap:5,padding:'7px 12px',background:'#0f0f0f',color:'#fff',borderRadius:4,fontSize:12,fontWeight:700,textDecoration:'none',whiteSpace:'nowrap'}}>
+                Get Key <ExternalLink size={11}/>
+              </a>
+            </div>
+            <div style={{fontSize:12,color:'#3a3730',lineHeight:1.8,marginBottom:14}}>
+              <div style={{fontWeight:700,fontSize:11,letterSpacing:'0.1em',textTransform:'uppercase',color:'#7a7469',marginBottom:6}}>Steps to get your key:</div>
+              <ol style={{paddingLeft:18,display:'flex',flexDirection:'column',gap:4}}>
+                <li>Go to <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" style={{color:'#1a4fd8'}}>console.anthropic.com/settings/keys</a> in a new tab</li>
+                <li>Sign in or create a free Anthropic account</li>
+                <li>Click <strong>"Create Key"</strong> — name it anything (e.g. "job-board")</li>
+                <li>Copy the key — it starts with <code style={{background:'#e8e4da',padding:'1px 5px',borderRadius:3,fontSize:11}}>sk-ant-</code></li>
+                <li>Add a small amount of credit ($5–$10) under Billing — required to use the API</li>
+                <li>Paste the key below</li>
+              </ol>
+            </div>
+            <KeyField
+              label="Anthropic API Key"
+              value={wizAnthropicKey}
+              onChange={setWizAnthropicKey}
+              valid={anthropicValid}
+              placeholder="sk-ant-api03-..."
+              note='Key must start with "sk-ant-" — check that you copied the full key'
+            />
+          </div>
+
+          {/* Serper card */}
+          <div style={{background:'#f5f2ec',borderRadius:6,padding:18,border:'1px solid #e8e4da'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:'#0f0f0f',marginBottom:2}}>2. Serper API Key</div>
+                <div style={{fontSize:11,color:'#7a7469'}}>Powers live Google job search results (2,500 free searches/month)</div>
+              </div>
+              <a href="https://serper.dev/api-key" target="_blank" rel="noreferrer"
+                style={{display:'flex',alignItems:'center',gap:5,padding:'7px 12px',background:'#0f0f0f',color:'#fff',borderRadius:4,fontSize:12,fontWeight:700,textDecoration:'none',whiteSpace:'nowrap'}}>
+                Get Key <ExternalLink size={11}/>
+              </a>
+            </div>
+            <div style={{fontSize:12,color:'#3a3730',lineHeight:1.8,marginBottom:14}}>
+              <div style={{fontWeight:700,fontSize:11,letterSpacing:'0.1em',textTransform:'uppercase',color:'#7a7469',marginBottom:6}}>Steps to get your key:</div>
+              <ol style={{paddingLeft:18,display:'flex',flexDirection:'column',gap:4}}>
+                <li>Go to <a href="https://serper.dev" target="_blank" rel="noreferrer" style={{color:'#1a4fd8'}}>serper.dev</a> in a new tab</li>
+                <li>Click <strong>"Get Started"</strong> and create a free account</li>
+                <li>After signing in, go to <a href="https://serper.dev/api-key" target="_blank" rel="noreferrer" style={{color:'#1a4fd8'}}>serper.dev/api-key</a></li>
+                <li>Copy your API key from the dashboard</li>
+                <li>Paste it below — no credit card required for the free tier</li>
+              </ol>
+            </div>
+            <KeyField
+              label="Serper API Key"
+              value={wizSerperKey}
+              onChange={setWizSerperKey}
+              valid={serperValid}
+              placeholder="Paste your Serper API key..."
+              note="Key appears too short — make sure you copied the full key from the dashboard"
+            />
+          </div>
+        </div>
+      );
+
+      // ── STEP 1: RESUME ───────────────────────────────────────────────────
+      case 1: return (
+        <div>
+          <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:8}}>Upload Your Documents</h2>
+          <p style={{fontSize:14,color:'#5a5449',lineHeight:1.7,marginBottom:20}}>
+            Upload your resume and cover letter. We'll extract your profile automatically. Supports HTML, DOCX, and text-based PDF.
+          </p>
+
+          {/* Resume upload */}
+          <div style={{marginBottom:20}}>
+            <div style={{fontSize:11,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:8,display:'flex',alignItems:'center',gap:6}}><FileText size={12}/>Resume</div>
+            <input ref={fileRef} type="file" accept=".html,.htm,.pdf,.docx" style={{display:'none'}}
+              onChange={e=>{const f=e.target.files?.[0];if(f){handleResumeUpload(f).then(()=>setWizResumeMeta(getUploadedResumeMeta()));}}}/>
+            <div onClick={()=>fileRef.current?.click()} style={{border:`2px dashed ${(wizResumeMeta||uploadMsg.startsWith('✓'))?'#2a6644':'#d6d0c4'}`,borderRadius:8,padding:'20px 24px',textAlign:'center',cursor:'pointer',background:(wizResumeMeta||uploadMsg.startsWith('✓'))?'#f0faf5':'#fff'}}>
+              <Upload size={26} color={(wizResumeMeta||uploadMsg.startsWith('✓'))?'#2a6644':'#7a7469'} style={{marginBottom:8}}/>
+              <div style={{fontWeight:700,fontSize:14,marginBottom:3,color:'#0f0f0f'}}>Choose Resume File</div>
+              <div style={{fontSize:11,color:'#7a7469'}}>HTML · DOCX · PDF (text-based)</div>
+            </div>
+            {uploading&&<div style={{fontSize:12,color:'#b5882e',display:'flex',alignItems:'center',gap:6,marginTop:8}}><Clock size={13}/>Extracting profile data...</div>}
+            {!uploading&&wizResumeMeta&&(
+              <div style={{display:'flex',alignItems:'center',gap:5,background:'#d6ede2',borderRadius:4,padding:'7px 10px',marginTop:8}}>
+                <CheckCircle size={12} color="#2a6644" fill="#2a6644"/>
+                <div style={{flex:1,textAlign:'left'}}>
+                  <div style={{fontSize:11,fontWeight:700,color:'#2a6644'}}>{wizResumeMeta.filename}</div>
+                  <div style={{fontSize:10,color:'#4a8c66'}}>Loaded {fmtDateTime(wizResumeMeta.uploadedAt)}</div>
+                </div>
+                <button onClick={e=>{e.stopPropagation();fileRef.current?.click();}} style={{background:'none',border:'none',cursor:'pointer',fontSize:11,color:'#7a7469',textDecoration:'underline'}}>Re-upload</button>
+              </div>
+            )}
+            {!uploading&&!wizResumeMeta&&uploadMsg&&<div style={{fontSize:12,color:uploadMsg.startsWith('✓')?'#2a6644':'#c8460a',marginTop:8,display:'flex',alignItems:'center',gap:5}}><CheckCircle size={13}/>{uploadMsg}</div>}
+          </div>
+
+          {/* Cover letter upload */}
+          <div style={{borderTop:'1px solid #d6d0c4',paddingTop:20,marginBottom:16}}>
+            <div style={{fontSize:11,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:8,display:'flex',alignItems:'center',gap:6}}><Mail size={12}/>Cover Letter</div>
+            <input ref={coverFileRef} type="file" accept=".html,.htm,.pdf,.docx" style={{display:'none'}}
+              onChange={async e=>{
+                const f=e.target.files?.[0]; if(!f) return;
+                setCoverUploadMsg('Storing file...');
+                try{
+                  const text=await parseFile(f);
+                  const ext=f.name.split('.').pop()?.toLowerCase() as UploadMeta['fileType'];
+                  const meta={filename:f.name,uploadedAt:new Date().toISOString(),fileType:ext};
+                  setUploadedCover(text,meta);
+                  setWizCoverMeta(meta);
+                  setCoverUploadMsg('✓ Cover letter stored');
+                }catch(err:unknown){setCoverUploadMsg(err instanceof Error?err.message:'Upload failed');}
+              }}/>
+            <div onClick={()=>wizCoverMeta?undefined:coverFileRef.current?.click()} style={{border:`2px dashed ${wizCoverMeta?'#2a6644':'#d6d0c4'}`,borderRadius:8,padding:'20px 24px',textAlign:'center',cursor:wizCoverMeta?'default':'pointer',background:wizCoverMeta?'#f0faf5':'#fff'}}>
+              <Upload size={26} color={wizCoverMeta?'#2a6644':'#7a7469'} style={{marginBottom:8}}/>
+              <div style={{fontWeight:700,fontSize:14,marginBottom:3,color:'#0f0f0f'}}>Choose Cover Letter File</div>
+              <div style={{fontSize:11,color:'#7a7469'}}>HTML · DOCX · PDF (text-based)</div>
+            </div>
+            {wizCoverMeta&&(
+              <div style={{display:'flex',alignItems:'center',gap:5,background:'#d6ede2',borderRadius:4,padding:'7px 10px',marginTop:8}}>
+                <CheckCircle size={12} color="#2a6644" fill="#2a6644"/>
+                <div style={{flex:1,textAlign:'left'}}>
+                  <div style={{fontSize:11,fontWeight:700,color:'#2a6644'}}>{wizCoverMeta.filename}</div>
+                  <div style={{fontSize:10,color:'#4a8c66'}}>Loaded {fmtDateTime(wizCoverMeta.uploadedAt)}</div>
+                </div>
+                <button onClick={e=>{e.stopPropagation();coverFileRef.current?.click();}} style={{background:'none',border:'none',cursor:'pointer',fontSize:11,color:'#7a7469',textDecoration:'underline'}}>Re-upload</button>
+              </div>
+            )}
+            {!wizCoverMeta&&coverUploadMsg&&<div style={{fontSize:12,color:coverUploadMsg.startsWith('✓')?'#2a6644':'#c8460a',marginTop:8,display:'flex',alignItems:'center',gap:5}}><CheckCircle size={13}/>{coverUploadMsg}</div>}
+          </div>
+
+          <button onClick={()=>setStep(2)} style={{fontSize:13,color:'#7a7469',background:'none',border:'none',cursor:'pointer',textDecoration:'underline'}}>
+            Skip — fill in manually
+          </button>
+        </div>
+      );
+
+
+      // ── STEP 2: PROFILE ──────────────────────────────────────────────────
+      case 2: {
+        const didNotFind=(k:string)=>extractedFields.size>0&&!extractedFields.has(k);
+        const hint=(k:string)=>didNotFind(k)?(
+          <div style={{fontSize:10,color:'#b5882e',marginTop:3,display:'flex',alignItems:'center',gap:3}}>
+            <AlertTriangle size={10}/>Did not find in resume
+          </div>
+        ):null;
+        return (
+          <div>
+            <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:8}}>Your Information</h2>
+            <p style={{fontSize:14,color:'#5a5449',marginBottom:4}}>Review and confirm your details. Fields marked below were not found in your resume.</p>
+            {extractedFields.size>0&&<p style={{fontSize:12,color:'#2a6644',marginBottom:16,display:'flex',alignItems:'center',gap:5}}><CheckCircle size={13} fill="#2a6644" color="#2a6644"/>Extracted {extractedFields.size} fields from your resume</p>}
+            <div style={{display:'grid',gap:14}}>
+              {([
+                ['name','Full Name','text'],['email','Email','email'],['phone','Phone','text'],
+                ['mostRecentRole','Most Recent Job Title','text'],['mostRecentEmployer','Most Recent Employer','text'],
+                ['yearsExperience','Years of Experience','text'],
+              ] as [keyof CandidateProfile,string,string][]).map(([k,label,type])=>(
+                <div key={k}>
+                  <label style={lbl}>{label}</label>
+                  <input type={type} value={profile[k] as string} onChange={e=>upd(k,e.target.value)} style={inp()}/>
+                  {hint(k)}
+                </div>
+              ))}
+              <div>
+                <label style={lbl}>Discipline / Field</label>
+                <input type="text" value={profile.discipline||''} onChange={e=>upd('discipline',e.target.value)} style={inp()} placeholder="e.g. UX Design, Product Management, Engineering"/>
+                {hint('discipline')}
+                <div style={{fontSize:11,color:'#7a7469',marginTop:4}}>Used to personalize recruiter framing in your search instructions.</div>
+              </div>
+              <div>
+                <label style={lbl}>Core Strengths</label>
+                <input type="text" value={profile.coreStrengths} onChange={e=>upd('coreStrengths',e.target.value)} style={inp()} placeholder="e.g. E-commerce, Enterprise SaaS, Design Systems"/>
+                {hint('coreStrengths')}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // ── STEP 3: LINKS ────────────────────────────────────────────────────
+      case 3: return (
+        <div>
+          <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:8}}>Your Links</h2>
+          <p style={{fontSize:14,color:'#5a5449',marginBottom:20}}>Add your professional links. These appear in all instructions and generated documents.</p>
+          {extractedFields.size>0&&profile.linkedinUrl&&<div style={{fontSize:12,color:'#2a6644',marginBottom:12,display:'flex',alignItems:'center',gap:5}}><CheckCircle size={13} fill="#2a6644" color="#2a6644"/>Links extracted from resume — review below</div>}
+          <div style={{display:'grid',gap:12,marginBottom:20}}>
+            <div>
+              <label style={lbl}>LinkedIn URL</label>
+              <input type="text" value={profile.linkedinUrl} onChange={e=>upd('linkedinUrl',e.target.value)} style={inp()} placeholder="linkedin.com/in/username"/>
+              {extractedFields.size>0&&!extractedFields.has('linkedinUrl')&&<div style={{fontSize:10,color:'#b5882e',marginTop:3,display:'flex',alignItems:'center',gap:3}}><AlertTriangle size={10}/>Did not find in resume</div>}
+            </div>
+            <div>
+              <label style={lbl}>Portfolio URL</label>
+              <input type="text" value={profile.portfolioUrl} onChange={e=>upd('portfolioUrl',e.target.value)} style={inp()} placeholder="yourportfolio.com"/>
+              {extractedFields.size>0&&!extractedFields.has('portfolioUrl')&&<div style={{fontSize:10,color:'#b5882e',marginTop:3,display:'flex',alignItems:'center',gap:3}}><AlertTriangle size={10}/>Did not find in resume</div>}
+            </div>
+          </div>
+          <div style={{borderTop:'1px solid #d6d0c4',paddingTop:16,marginBottom:12}}>
+            <label style={lbl}>Additional Links</label>
+            {profile.additionalLinks.map((l,i)=>(
+              <div key={i} style={{background:'#f5f2ec',borderRadius:4,padding:'10px 12px',marginBottom:8,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div>
+                  <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.1em',color:'#c8460a',marginBottom:2}}>{l.title}</div>
+                  <div style={{fontSize:13,color:'#3a3730'}}>{l.url}</div>
+                </div>
+                <button onClick={()=>removeLink(i)} style={{background:'none',border:'none',cursor:'pointer',color:'#c8460a'}}><X size={16}/></button>
+              </div>
+            ))}
+            <div style={{background:'#fff',border:'1.5px solid #d6d0c4',borderRadius:4,padding:14}}>
+              {linkStep==='title'?(
+                <div>
+                  <label style={lbl}>Link Title</label>
+                  <div style={{display:'flex',gap:8}}>
+                    <input type="text" value={newLinkTitle} onChange={e=>setNewLinkTitle(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addLink()} style={inp({flex:'1',marginBottom:0})} placeholder="e.g. Dribbble, GitHub, Case Studies"/>
+                    <button onClick={addLink} disabled={!newLinkTitle.trim()} style={{padding:'10px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13,display:'flex',alignItems:'center',gap:5}}>Next<ChevronRight size={14}/></button>
+                  </div>
+                </div>
+              ):(
+                <div>
+                  <div style={{fontSize:12,fontWeight:700,color:'#c8460a',marginBottom:8}}>"{newLinkTitle}" URL</div>
+                  <div style={{display:'flex',gap:8}}>
+                    <input type="text" value={newLinkUrl} onChange={e=>setNewLinkUrl(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addLink()} style={inp({flex:'1',marginBottom:0})} placeholder="https://..."/>
+                    <button onClick={addLink} disabled={!newLinkUrl.trim()} style={{padding:'10px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13,display:'flex',alignItems:'center',gap:5}}><Plus size={14}/>Add</button>
+                    <button onClick={()=>{setLinkStep('title');setNewLinkUrl('');}} style={{padding:'10px 12px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer'}}><ChevronLeft size={14}/></button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+
+      // ── STEP 4: TITLES ───────────────────────────────────────────────────
+      case 4: return (
+        <div>
+          <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:8}}>Target Job Titles</h2>
+          <p style={{fontSize:14,color:'#5a5449',marginBottom:8}}>What roles are you targeting? These drive your search queries.</p>
+          {extractedFields.has('targetTitles')&&profile.targetTitles.length>0&&<div style={{fontSize:12,color:'#2a6644',marginBottom:12,display:'flex',alignItems:'center',gap:5}}><CheckCircle size={13} fill="#2a6644" color="#2a6644"/>Suggested from your resume — includes titles one level above your most recent role</div>}
+          {extractedFields.size>0&&!extractedFields.has('targetTitles')&&<div style={{fontSize:12,color:'#b5882e',marginBottom:12,display:'flex',alignItems:'center',gap:5}}><AlertTriangle size={12}/>Did not find target titles in resume — add them below</div>}
+          <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:16}}>
+            {profile.targetTitles.map(t=>(
+              <span key={t} style={{display:'flex',alignItems:'center',gap:5,background:'#0f0f0f',color:'#f5f2ec',fontSize:12,fontWeight:600,padding:'5px 10px',borderRadius:4}}>
+                {t}<button onClick={()=>removeTargetTitle(t)} style={{background:'none',border:'none',cursor:'pointer',color:'rgba(255,255,255,0.6)',padding:0,display:'flex'}}><X size={12}/></button>
+              </span>
+            ))}
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <input type="text" value={newTitle} onChange={e=>setNewTitle(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addTargetTitle()} style={inp({flex:'1',marginBottom:0})} placeholder="e.g. VP of Design"/>
+            <button onClick={addTargetTitle} disabled={!newTitle.trim()} style={{padding:'10px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13,display:'flex',alignItems:'center',gap:5}}><Plus size={14}/>Add</button>
+          </div>
+
+          <div style={{borderTop:'1px solid #d6d0c4',paddingTop:20,marginTop:20}}>
+            <label style={lbl}>Target Sectors / Industries</label>
+            {extractedFields.has('targetSectors')&&profile.targetSectors.length>0&&<div style={{fontSize:12,color:'#2a6644',marginBottom:8,display:'flex',alignItems:'center',gap:5}}><CheckCircle size={13} fill="#2a6644" color="#2a6644"/>Extracted from your resume — review below</div>}
+            {extractedFields.size>0&&!extractedFields.has('targetSectors')&&<div style={{fontSize:12,color:'#b5882e',marginBottom:8,display:'flex',alignItems:'center',gap:5}}><AlertTriangle size={12}/>Did not find in resume — add your target industries below</div>}
+            <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:12}}>
+              {(profile.targetSectors||[]).map(s=>(
+                <span key={s} style={{display:'flex',alignItems:'center',gap:5,background:'#dde8f5',color:'#1a4fd8',fontSize:12,fontWeight:600,padding:'5px 10px',borderRadius:4}}>
+                  {s}<button onClick={()=>upd('targetSectors',(profile.targetSectors||[]).filter(x=>x!==s))} style={{background:'none',border:'none',cursor:'pointer',color:'rgba(26,79,216,0.6)',padding:0,display:'flex'}}><X size={12}/></button>
+                </span>
+              ))}
+            </div>
+            <div style={{display:'flex',gap:8}}>
+              <input type="text" value={newSector} onChange={e=>setNewSector(e.target.value)}
+                onKeyDown={e=>{if(e.key==='Enter'&&newSector.trim()){upd('targetSectors',[...(profile.targetSectors||[]),newSector.trim()]);setNewSector('');}}}
+                style={inp({flex:'1',marginBottom:0})} placeholder="e.g. Fintech, Healthcare, SaaS, Retail"/>
+              <button onClick={()=>{if(newSector.trim()){upd('targetSectors',[...(profile.targetSectors||[]),newSector.trim()]);setNewSector('');}}} disabled={!newSector.trim()} style={{padding:'10px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13,display:'flex',alignItems:'center',gap:5}}><Plus size={14}/>Add</button>
+            </div>
+          </div>
+        </div>
+      );
+
+      // ── STEP 5: WORK PREFS ───────────────────────────────────────────────
+      case 5: return (
+        <div>
+          <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:8}}>Work Preferences</h2>
+          <p style={{fontSize:14,color:'#5a5449',marginBottom:20}}>Select your preferred work arrangements and locations.</p>
+          <label style={lbl}>Work Type (select all that apply)</label>
+          <div style={{display:'flex',gap:10,marginBottom:24,flexWrap:'wrap'}}>
+            {[['remote','Remote'],['hybrid','Hybrid'],['onsite','On-site']].map(([val,label])=>(
+              <button key={val} onClick={()=>toggleWorkType(val)} style={{padding:'10px 20px',borderRadius:4,fontWeight:700,fontSize:13,cursor:'pointer',border:`2px solid ${profile.workTypes.includes(val)?'#0f0f0f':'#d6d0c4'}`,background:profile.workTypes.includes(val)?'#0f0f0f':'transparent',color:profile.workTypes.includes(val)?'#fff':'#7a7469'}}>{label}</button>
+            ))}
+          </div>
+          {(profile.workTypes.includes('hybrid')||profile.workTypes.includes('onsite'))&&(
+            <div>
+              <label style={lbl}>Acceptable States / Cities</label>
+              <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:10}}>
+                {profile.locations.map(l=>(
+                  <span key={l} style={{display:'flex',alignItems:'center',gap:4,background:'#f2e8cb',color:'#b5882e',fontSize:12,fontWeight:700,padding:'4px 10px',borderRadius:3}}>
+                    <MapPin size={10}/>{l}<button onClick={()=>removeLocation(l)} style={{background:'none',border:'none',cursor:'pointer',color:'#b5882e',padding:0}}><X size={10}/></button>
+                  </span>
+                ))}
+              </div>
+              <div style={{display:'flex',gap:8}}>
+                <input type="text" value={newLocation} onChange={e=>setNewLocation(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addLocation()} style={inp({flex:'1',marginBottom:0})} placeholder="e.g. AZ, Phoenix, TX"/>
+                <button onClick={addLocation} disabled={!newLocation.trim()} style={{padding:'10px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13,display:'flex',alignItems:'center',gap:5}}><Plus size={14}/>Add</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+
+      // ── STEP 6: SALARY ───────────────────────────────────────────────────
+      case 6: return (
+        <div>
+          <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:24,marginBottom:8}}>Salary Range</h2>
+          <p style={{fontSize:14,color:'#5a5449',marginBottom:8}}>Set your target compensation range. This filters job results and informs search queries.</p>
+          {extractedFields.has('salaryMin')&&(profile.salaryMin>0||profile.salaryMax>0)&&<div style={{fontSize:12,color:'#2a6644',marginBottom:12,display:'flex',alignItems:'center',gap:5}}><CheckCircle size={13} fill="#2a6644" color="#2a6644"/>Salary range extracted from resume — adjust if needed</div>}
+          {extractedFields.size>0&&!extractedFields.has('salaryMin')&&<div style={{fontSize:12,color:'#b5882e',marginBottom:12,display:'flex',alignItems:'center',gap:5}}><AlertTriangle size={12}/>Salary not found in resume — set your target range below</div>}
+          <SalarySlider min={profile.salaryMin} max={profile.salaryMax} onChange={(mn,mx)=>{upd('salaryMin',mn);upd('salaryMax',mx);}}/>
+        </div>
+      );
+
+      default: return null;
+    }
+  };
+
+  const stepLabels=['API Keys','Resume','Profile','Links','Titles','Work','Salary'];
+  const isLastStep=step===TOTAL_STEPS-1;
+  const canFinish=keysComplete;
+
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:900,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+      <div style={{background:'#fff',borderRadius:6,width:'100%',maxWidth:580,maxHeight:'92vh',overflowY:'auto',boxShadow:'0 16px 64px rgba(0,0,0,0.25)',display:'flex',flexDirection:'column'}}>
+
+        {/* Wizard header */}
+        <div style={{padding:'20px 24px 16px',borderBottom:'2px solid #0f0f0f',position:'sticky',top:0,background:'#fff',zIndex:10}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+            <div>
+              <div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:6}}><Wand2 size={11}/>Guided Setup</div>
+              <div style={{fontSize:13,color:'#7a7469'}}>Step {step+1} of {TOTAL_STEPS} — {stepLabels[step]}</div>
+            </div>
+            <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={20}/></button>
+          </div>
+          <div style={{height:4,background:'#f5f2ec',borderRadius:2,overflow:'hidden'}}>
+            <div style={{height:'100%',background:'#c8460a',borderRadius:2,width:`${pct}%`,transition:'width 0.3s ease'}}/>
+          </div>
+          <div style={{display:'flex',gap:6,marginTop:10}}>
+            {stepLabels.map((l,i)=>(
+              <div key={l} style={{flex:1,textAlign:'center'}}>
+                <div style={{height:3,borderRadius:2,background:i<=step?'#c8460a':'#e8e4dc',marginBottom:4}}/>
+                <div style={{fontSize:9,color:i===step?'#c8460a':i<step?'#7a7469':'#c4bfb5',fontWeight:i===step?700:400}}>{l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Extraction loading screen */}
+        {extracting&&(
+          <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:20,padding:32,background:'#fff'}}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="https://cdn.dribbble.com/userupload/19917114/file/original-880f3ab68d9bcfe041db6649d5f8003b.gif" alt="Loading" style={{width:160,height:160,objectFit:'contain',borderRadius:8}}/>
+            <div style={{textAlign:'center'}}>
+              <div style={{fontFamily:'DM Serif Display,serif',fontSize:18,color:'#0f0f0f',marginBottom:6}}>Gathering everything needed</div>
+              <div style={{fontSize:13,color:'#7a7469'}}>to optimize your search...</div>
+            </div>
+          </div>
+        )}
+        {/* Step content */}
+        {!extracting&&<div style={{padding:'24px',flex:1}}>{stepContent()}</div>}
+
+        {/* Keys warning banner — shown on all steps after step 0 if keys missing */}
+        {step>0&&!keysComplete&&(
+          <div style={{margin:'0 24px 16px',padding:'12px 16px',background:'#fff8f6',border:'1px solid #e8bead',borderRadius:4,fontSize:12,color:'#6b2200',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+            <AlertTriangle size={14} color="#c8460a"/>
+            <span>API keys required to finish.</span>
+            <button onClick={()=>setStep(0)} style={{color:'#c8460a',background:'none',border:'none',cursor:'pointer',fontWeight:700,fontSize:12,textDecoration:'underline',padding:0}}>
+              Go to API Keys step
+            </button>
+            <span>·</span>
+            <button onClick={onOpenHowTo} style={{color:'#1a4fd8',background:'none',border:'none',cursor:'pointer',fontSize:12,textDecoration:'underline',padding:0,display:'flex',alignItems:'center',gap:3}}>
+              <HelpCircle size={12}/>How to Use
+            </button>
+          </div>
+        )}
+
+        {/* Nav */}
+        <div style={{padding:'16px 24px',borderTop:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between',position:'sticky',bottom:0,background:'#fff'}}>
+          <button onClick={()=>step>0?setStep(s=>s-1):onClose()} style={{display:'flex',alignItems:'center',gap:5,padding:'10px 18px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>
+            <ChevronLeft size={14}/>{step===0?'Cancel':'Back'}
+          </button>
+          {!isLastStep
+            ?<button onClick={()=>step===1?extractAndAdvance():setStep(s=>s+1)} disabled={extracting} style={{display:'flex',alignItems:'center',gap:5,padding:'10px 22px',background:extracting?'#7a7469':'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:extracting?'not-allowed':'pointer',fontWeight:700,fontSize:13}}>
+              Next<ChevronRight size={14}/>
+            </button>
+            :<div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6}}>
+              <button
+                onClick={canFinish?finish:undefined}
+                style={{display:'flex',alignItems:'center',gap:5,padding:'10px 22px',background:canFinish?'#c8460a':'#d6d0c4',color:'#fff',border:'none',borderRadius:4,cursor:canFinish?'pointer':'not-allowed',fontWeight:700,fontSize:14,opacity:canFinish?1:0.7}}
+              >
+                <CheckCircle size={15}/>Save & Finish
+              </button>
+              {!canFinish&&<div style={{fontSize:11,color:'#7a7469'}}>Complete API keys to enable</div>}
+            </div>
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Upload Card ────────────────────────────────────────────────────────────
+function UploadCard({type,meta,onUpload}:{type:'resume'|'cover';meta:UploadMeta|null;onUpload:(f:File)=>Promise<void>;}) {
+  const inputRef=useRef<HTMLInputElement>(null);
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState('');
+  const handle=async(e:React.ChangeEvent<HTMLInputElement>)=>{
+    const file=e.target.files?.[0]; if(!file) return;
+    setLoading(true); setError('');
+    try{await onUpload(file);}
+    catch(err:unknown){setError(err instanceof Error?err.message:'Upload failed');}
+    finally{setLoading(false);if(inputRef.current)inputRef.current.value='';}
+  };
+  return (
+    <div style={{background:'#fff',border:`2px dashed ${meta?'#2a6644':'#d6d0c4'}`,borderRadius:8,padding:'22px 18px',textAlign:'center',cursor:'pointer',transition:'border-color 0.2s'}}
+      onClick={meta?undefined:()=>inputRef.current?.click()}>
+      <input ref={inputRef} type="file" accept=".html,.htm,.pdf,.docx" style={{display:'none'}} onChange={handle}/>
+      <div style={{color:meta?'#2a6644':'#7a7469',marginBottom:7,display:'flex',justifyContent:'center'}}>
+        {type==='resume'?<FileText size={24}/>:<Mail size={24}/>}
+      </div>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:3,color:'#0f0f0f'}}>{type==='resume'?'Upload Resume':'Upload Cover Letter'}</div>
+      <div style={{fontSize:11,color:'#7a7469',marginBottom:10}}>Text-only PDF · DOCX · HTML</div>
+      {loading&&<div style={{fontSize:12,color:'#b5882e'}}>Parsing file...</div>}
+      {error&&<div style={{fontSize:12,color:'#c8460a',marginTop:6}}>{error}</div>}
+      {meta&&!loading&&(
+        <div style={{display:'flex',alignItems:'center',gap:5,justifyContent:'center',background:'#d6ede2',borderRadius:4,padding:'7px 10px',marginTop:6}}>
+          <CheckCircle size={12} color="#2a6644" fill="#2a6644"/>
+          <div style={{textAlign:'left'}}>
+            <div style={{fontSize:11,fontWeight:700,color:'#2a6644'}}>{meta.filename}</div>
+            <div style={{fontSize:10,color:'#4a8c66'}}>Loaded {fmtDateTime(meta.uploadedAt)}</div>
+          </div>
+        </div>
+      )}
+      {!meta&&!loading&&(
+        <div style={{display:'inline-flex',alignItems:'center',gap:5,background:'#0f0f0f',color:'#fff',borderRadius:4,padding:'6px 12px',fontSize:12,fontWeight:600}}>
+          <Upload size={11}/>Choose File
+        </div>
+      )}
+      {meta&&!loading&&(
+        <button onClick={e=>{e.stopPropagation();inputRef.current?.click();}} style={{background:'none',border:'none',cursor:'pointer',fontSize:11,color:'#7a7469',textDecoration:'underline',marginTop:8,display:'block',width:'100%',textAlign:'center'}}>
+          Re-upload
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── How-To Drawer ──────────────────────────────────────────────────────────
+function HowToDrawer({onClose}:{onClose:()=>void;}) {
+  return (
+    <>
+      <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.3)',zIndex:300}}/>
+      <div style={{position:'fixed',top:64,right:0,bottom:0,width:420,maxWidth:'95vw',background:'#fff',zIndex:400,boxShadow:'-8px 0 32px rgba(0,0,0,0.15)',overflowY:'auto',animation:'slideInRight 0.25s ease'}}>
+        <div style={{padding:'18px 22px 14px',borderBottom:'2px solid #0f0f0f',display:'flex',justifyContent:'space-between',alignItems:'flex-start',position:'sticky',top:0,background:'#fff',zIndex:10}}>
+          <div>
+            <div style={{fontSize:10,letterSpacing:'0.18em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:5}}>Complete Guide</div>
+            <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:20,fontWeight:400}}>How to Use</h2>
+          </div>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777',padding:4}}><X size={20}/></button>
+        </div>
+        <div style={{padding:'18px 22px',display:'flex',flexDirection:'column',gap:24}}>
+          {[
+            {num:'1',title:'First-Time Setup',color:'#c8460a',items:[
+              ['Get Anthropic API Key','Go to console.anthropic.com/settings/keys → sign in → Create Key → copy it → paste in Settings tab. This is a separate account from Claude.ai.'],
+              ['Get Serper API Key','Go to serper.dev → sign up free (2,500 searches/month) → Dashboard → API Key → paste in Settings tab.'],
+              ['Guided Setup Wizard','On the Search tab, click "Launch Guided Experience" to walk through your profile setup step by step. The wizard auto-extracts data from your uploaded resume.'],
+              ['Upload Templates','Search tab → Upload Resume + Cover Letter cards. Accepts HTML, DOCX, or text-based PDF. Scanned/image PDFs will not work for extraction.'],
+            ]},
+            {num:'2',title:'How Extraction Works',color:'#b5882e',items:[
+              ['Resume Extraction','When you upload a resume (HTML, DOCX, or PDF), the app silently calls the Claude API to extract your name, contact info, job history, and skills. This costs approximately $0.01–0.03 per extraction.'],
+              ['Instruction Auto-Update','Extracted data is used to personalize all three instruction sets (Job Search, Resume, Cover Letter) with your actual name, URLs, experience, and salary targets.'],
+              ['Wizard Override','The Guided Setup Wizard lets you review and correct any extracted data before saving. Always review after extraction.'],
+            ]},
+            {num:'3',title:'Running a Job Search',color:'#0f0f0f',items:[
+              ['Search Tab','Click "Run Job Search". Instructions are pre-loaded from your saved profile. Edit them only in Settings.'],
+              ['Special Instructions','One-off override for this search session only — not saved permanently.'],
+              ['Loading Screen','Shows estimated ready time (~4–6 min). Press Esc to cancel with confirmation.'],
+              ['Results','Board tab opens automatically with verified, triple-layer audited roles only.'],
+            ]},
+            {num:'4',title:'The Job Board',color:'#1a4fd8',items:[
+              ['Filter & Sort','Filter by seniority level or Remote Only. Sort by Salary or Fit Rating.'],
+              ['Expand Cards','Click any card for full details: role summary, why you fit, requirements, company info, gold & red flags.'],
+              ['Excluded Jobs','Scroll to bottom of Board. Click "Add to Board" on any excluded role to manually promote it.'],
+              ['Rating','Green 8–10 (near perfect), Amber 6–7 (strong with gap), Red 5–6 (solid fundamentals). Below 5 not shown.'],
+            ]},
+            {num:'5',title:'Generating Documents',color:'#2a6644',items:[
+              ['Create Resume / Cover Letter','Button on each expanded job card. Opens the generation modal.'],
+              ['Paste Full JD','For best ATS alignment, paste the complete job description text. The auto-filled version is a starting point only.'],
+              ['Loading Screen','Full-screen overlay appears. Click "dismiss loading screen" to hide it — generation continues in background.'],
+              ['"Generation in Progress"','While generating behind the scenes, a notice appears below the button on the card.'],
+              ['Preview & Download','Preview opens the document in a new tab. Download saves as an HTML file named by role and company.'],
+              ['Auto-Marked Applied','Generating any document marks the job as Applied in the tracker automatically.'],
+            ]},
+            {num:'6',title:'Applied Jobs Tracker',color:'#b5882e',items:[
+              ['Status Timeline','Additive history: Applied → Interview → Offer → Rejected. Old statuses are never removed.'],
+              ['Add Status','Click "+ Status" on any tracked job. Add an optional note per status entry.'],
+              ['Duplicate Guard','"Already Applied" banner appears on Board cards for jobs in your tracker.'],
+              ['Delete & Clear','Trash icon removes one job. "Clear All" resets the entire tracker.'],
+            ]},
+            {num:'7',title:'Settings',color:'#6b21a8',items:[
+              ['Edit Instructions','Three text areas: Job Search, Resume, Cover Letter. Each has its own Save and Reset to Default buttons.'],
+              ['Reset Individual Set','Each instruction set has its own "Reset to Default" button with a confirmation modal.'],
+              ['Save','Writes to localStorage immediately — no file or redeploy needed.'],
+              ['Copy Instructions','Copies the full text to clipboard for manual repo updates if desired.'],
+              ['API Keys','Paste keys here to override Vercel environment variables instantly without redeploying.'],
+            ]},
+            {num:'8',title:'Reset & Profile',color:'#777',items:[
+              ['Reset All','The "Reset" button in the top nav clears ALL data: jobs, applied history, uploads, API keys, profile, and instructions. Requires confirmation.'],
+              ['Re-run Wizard','Click "Launch Guided Experience" on the Search tab at any time to update your profile. All instructions update automatically.'],
+              ['Wizard + Resume','If a resume is already uploaded when you open the wizard, it will note this and let you re-extract or continue with existing data.'],
+            ]},
+          ].map(section=>(
+            <section key={section.num}>
+              <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,borderLeft:`4px solid ${section.color}`,paddingLeft:12}}>
+                <h3 style={{fontFamily:'DM Serif Display,serif',fontSize:16,fontWeight:400}}>{section.num} — {section.title}</h3>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:8,paddingLeft:4}}>
+                {section.items.map(([t,d])=>(
+                  <div key={t}>
+                    <div style={{fontSize:12,fontWeight:700,color:'#0f0f0f',marginBottom:2}}>{t}</div>
+                    <div style={{fontSize:12,color:'#5a5449',lineHeight:1.65}}>{d}</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Generate Modal ─────────────────────────────────────────────────────────
+function GenerateModal({job,type,onClose,instructions,apiKey}:{
+  job:SavedJob;type:GenerateType;onClose:()=>void;instructions:string;apiKey:string;
+}) {
+  const [jd,setJd]=useState(job.roleSummary+'\n\nRequirements:\n'+(job.requirements?.join('\n')||''));
+  const [loading,setLoading]=useState(false);
+  const [dismissed,setDismissed]=useState(false);
+  const [html,setHtml]=useState('');
+  const [error,setError]=useState('');
+
+  // Check if user has uploaded their own template
+  const hasUploadedTemplate = type==='resume'
+    ? !!getUploadedResumeMeta()
+    : !!getUploadedCoverMeta();
+
+  const generate=async()=>{
+    setLoading(true);setDismissed(false);setError('');setHtml('');
+    try{
+      const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          type,jobData:job,jobDescription:jd,instructions,apiKeyOverride:apiKey,
+          uploadedTemplate:type==='resume'?getUploadedResume():getUploadedCover(),
+        })});
+      const data=await res.json();
+      if(!res.ok){setError(data.error||'Generation failed.');return;}
+      setHtml(data.html);
+      markDocGenerated(job.id,type,{company:job.company,title:job.title,jobDescUrl:job.jobDescUrl,applyUrl:job.applyUrl});
+    }catch(e:unknown){setError(e instanceof Error?e.message:'Unknown error');}
+    finally{setLoading(false);}
+  };
+
+  const preview=()=>{const w=window.open('','_blank');if(w){w.document.write(html);w.document.close();}};
+  const download=()=>{
+    const blob=new Blob([html],{type:'text/html'});const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=`${type==='resume'?'Resume':'CoverLetter'}_${job.company.replace(/[^a-zA-Z0-9]/g,'_')}_${job.title.replace(/[^a-zA-Z0-9]/g,'_').slice(0,30)}.html`;
+    a.click();URL.revokeObjectURL(url);
+  };
+
+  return (
+    <>
+      {loading&&!dismissed&&<LoadingOverlay dismissOnly onDismiss={()=>setDismissed(true)} minutesEta={1}/>}
+      <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:500,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+        <div style={{background:'#fff',borderRadius:4,boxShadow:'0 8px 32px rgba(0,0,0,0.14)',width:'100%',maxWidth:660,maxHeight:'85vh',overflowY:'auto'}}>
+          <div style={{padding:'20px 22px 14px',borderBottom:'1px solid #d6d0c4',display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:0,background:'#fff'}}>
+            <div>
+              <div style={{fontSize:10,letterSpacing:'0.12em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:4}}>{type==='resume'?'Create Resume':'Create Cover Letter'}</div>
+              <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:17}}>{job.company} — {job.title}</h2>
+            </div>
+            <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={20}/></button>
+          </div>
+          <div style={{padding:22}}>
+            {loading&&dismissed&&<div style={{display:'flex',alignItems:'center',gap:8,background:'#f2e8cb',borderRadius:4,padding:'10px 14px',marginBottom:14}}><Clock size={14} color="#b5882e"/><span style={{fontSize:13,color:'#7a5a1a',fontWeight:600}}>Generation in progress...</span></div>}
+            {!hasUploadedTemplate&&(
+              <div style={{background:'#fff8f6',border:'1px solid #e8bead',borderRadius:4,padding:'12px 14px',marginBottom:14,display:'flex',alignItems:'flex-start',gap:10}}>
+                <AlertTriangle size={15} color="#c8460a" style={{flexShrink:0,marginTop:2}}/>
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:'#6b2200',marginBottom:3}}>No {type==='resume'?'resume':'cover letter'} template uploaded</div>
+                  <div style={{fontSize:12,color:'#6b2200',lineHeight:1.6}}>
+                    Upload your {type==='resume'?'resume':'cover letter'} template on the Search tab or in the Setup Wizard for best results. Generation will use the default blank template until you upload your own.
+                  </div>
+                </div>
+              </div>
+            )}
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:6}}>Job Description</div>
+            <textarea value={jd} onChange={e=>setJd(e.target.value)} rows={9} disabled={loading}
+              style={{width:'100%',padding:'9px 12px',border:'1.5px solid #d6d0c4',borderRadius:4,fontFamily:'DM Sans,sans-serif',fontSize:13,resize:'vertical',outline:'none',marginBottom:14}}
+              placeholder="Paste full job description for best ATS alignment..."/>
+            {error&&<div style={{background:'#f5d5c8',color:'#6b2200',padding:'10px 14px',borderRadius:4,marginBottom:14,fontSize:13,display:'flex',gap:8,alignItems:'center'}}><AlertTriangle size={15}/>{error}</div>}
+            {html&&!loading&&<div style={{background:'#d6ede2',color:'#1a5c38',padding:'10px 14px',borderRadius:4,marginBottom:14,fontSize:13,display:'flex',gap:8,alignItems:'center'}}><CheckCircle size={15} fill="#1a5c38" color="#1a5c38"/>Document generated. Preview or download below.</div>}
+          </div>
+          <div style={{padding:'14px 22px',borderTop:'1px solid #d6d0c4',display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap',position:'sticky',bottom:0,background:'#fff'}}>
+            {html&&<>
+              <button onClick={preview} style={{display:'flex',alignItems:'center',gap:6,padding:'8px 14px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontSize:12,fontWeight:600}}><ExternalLink size={13}/>Preview</button>
+              <button onClick={download} style={{display:'flex',alignItems:'center',gap:6,padding:'8px 14px',background:'#c8460a',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontSize:12,fontWeight:600}}><Upload size={13}/>Download</button>
+              <button onClick={generate} disabled={loading} style={{display:'flex',alignItems:'center',gap:6,padding:'8px 12px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontSize:12,fontWeight:600,color:'#7a7469'}}><RotateCcw size={12}/>Regenerate</button>
+            </>}
+            {!html&&<button onClick={generate} disabled={loading} style={{display:'flex',alignItems:'center',gap:6,padding:'10px 20px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:loading?'not-allowed':'pointer',fontSize:13,fontWeight:600,opacity:loading?0.6:1}}><Sparkles size={14}/>{loading?'Generating...':`Generate ${type==='resume'?'Resume':'Cover Letter'}`}</button>}
+            <button onClick={onClose} style={{display:'flex',alignItems:'center',gap:6,padding:'8px 14px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontSize:12,fontWeight:600}}><X size={13}/>Close</button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Small Modals ───────────────────────────────────────────────────────────
+function SpecialModal({value,onChange,onClose}:{value:string;onChange:(v:string)=>void;onClose:()=>void;}) {
+  const [local,setLocal]=useState(value);
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:600,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:560,boxShadow:'0 8px 32px rgba(0,0,0,0.14)'}}>
+        <div style={{padding:'18px 22px 14px',borderBottom:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between'}}>
+          <div><div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:4}}>One-Off Override</div><h2 style={{fontFamily:'DM Serif Display,serif',fontSize:19}}>Special Instructions</h2></div>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={19}/></button>
+        </div>
+        <div style={{padding:22}}>
+          <p style={{fontSize:13,color:'#5a5449',marginBottom:12,lineHeight:1.6}}>Appended to your search instructions for this run only. Not saved.</p>
+          <textarea value={local} onChange={e=>setLocal(e.target.value)} rows={6}
+            style={{width:'100%',padding:'9px 12px',border:'1.5px solid #d6d0c4',borderRadius:4,fontFamily:'DM Sans,sans-serif',fontSize:13,resize:'vertical',outline:'none'}}
+            placeholder="e.g. Focus only on fintech companies this time..."/>
+        </div>
+        <div style={{padding:'14px 22px',borderTop:'1px solid #d6d0c4',display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button onClick={()=>{onChange(local);onClose();}} style={{padding:'9px 16px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13}}>Apply for this search</button>
+          <button onClick={()=>{onChange('');onClose();}} style={{padding:'9px 16px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>Clear & Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AddStatusModal({jobId,onClose}:{jobId:string;onClose:()=>void;}) {
+  const [status,setStatus]=useState<StatusEntry['status']>('interview');
+  const [note,setNote]=useState('');
+  const statuses:StatusEntry['status'][]=['applied','interview','offer','rejected'];
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:600,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:420,boxShadow:'0 8px 32px rgba(0,0,0,0.14)'}}>
+        <div style={{padding:'18px 22px 14px',borderBottom:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between'}}>
+          <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:19}}>Add Status Update</h2>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={19}/></button>
+        </div>
+        <div style={{padding:22}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:10}}>Status</div>
+          <div style={{display:'flex',gap:8,marginBottom:18,flexWrap:'wrap'}}>
+            {statuses.map(s=>(
+              <button key={s} onClick={()=>setStatus(s)} style={{padding:'6px 14px',borderRadius:4,border:`2px solid ${status===s?'#0f0f0f':'#d6d0c4'}`,background:status===s?'#0f0f0f':'transparent',color:status===s?'#fff':'#7a7469',fontWeight:700,fontSize:12,textTransform:'uppercase',letterSpacing:'0.06em',cursor:'pointer'}}>{s}</button>
+            ))}
+          </div>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:6}}>Note (optional)</div>
+          <input type="text" value={note} onChange={e=>setNote(e.target.value)} placeholder="e.g. Phone screen Friday..."
+            style={{width:'100%',padding:'9px 12px',border:'1.5px solid #d6d0c4',borderRadius:4,fontFamily:'DM Sans,sans-serif',fontSize:13,outline:'none'}}/>
+        </div>
+        <div style={{padding:'14px 22px',borderTop:'1px solid #d6d0c4',display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button onClick={()=>{addStatusToJob(jobId,status,note||undefined);onClose();}} style={{padding:'9px 16px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13}}>Add Status</button>
+          <button onClick={onClose} style={{padding:'9px 16px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MobileFAB({instructions,onClose}:{instructions:string;onClose:()=>void;}) {
+  return (
+    <>
+      <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.4)',zIndex:800}}/>
+      <div style={{position:'fixed',bottom:0,left:0,right:0,zIndex:900,height:'75vh',background:'#fff',borderRadius:'16px 16px 0 0',boxShadow:'0 -8px 32px rgba(0,0,0,0.2)',display:'flex',flexDirection:'column',animation:'slideUpSheet 0.3s ease'}}>
+        <div style={{padding:'14px 18px 12px',borderBottom:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'#fff'}}>
+          <div style={{fontSize:11,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a'}}>Search Instructions</div>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={20}/></button>
+        </div>
+        <div style={{padding:'14px 18px',flex:1,overflowY:'auto',overflowX:'hidden'}}>
+          <pre style={{fontSize:11,color:'#3a3730',lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',fontFamily:'monospace'}}>{instructions}</pre>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Job Card ───────────────────────────────────────────────────────────────
+
+// ── Analyze JD Input ──────────────────────────────────────────────────────
+function AnalyzeJDInput({excl,onContinue,onClose}:{
+  excl:{company:string;title:string;jobDescUrl?:string;applyUrl?:string};
+  onContinue:(jdText:string)=>void;
+  onClose:()=>void;
+}) {
+  const [mode,setMode]=useState<'none'|'file'|'text'>('none');
+  const [jdText,setJdText]=useState('');
+  const fileRef=useRef<HTMLInputElement>(null);
+  const [fileName,setFileName]=useState('');
+  const jdUrl=excl.jobDescUrl&&excl.jobDescUrl!=='#'?excl.jobDescUrl:excl.applyUrl&&excl.applyUrl!=='#'?excl.applyUrl:null;
+
+  const handleFile=async(e:React.ChangeEvent<HTMLInputElement>)=>{
+    const f=e.target.files?.[0]; if(!f) return;
+    try{const text=await parseFile(f);setJdText(text);setFileName(f.name);}
+    catch{setFileName('Error reading file');}
+  };
+
+  return (
+    <>
+      <div style={{padding:22}}>
+        <p style={{fontSize:13,color:'#5a5449',lineHeight:1.7,marginBottom:16}}>
+          Provide the job description below for a more accurate analysis — or just continue and we'll do our best with available information.
+        </p>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'nowrap'}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',whiteSpace:'nowrap'}}>Optional: Provide Job Description</div>
+          {jdUrl&&(
+            <a href={jdUrl} target="_blank" rel="noreferrer" style={{display:'inline-flex',alignItems:'center',gap:3,fontSize:10,color:'#1a4fd8',textDecoration:'none',fontWeight:600,whiteSpace:'nowrap'}}>
+              · View JD ↗
+            </a>
+          )}
+        </div>
+
+        <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
+          {[['none','Skip — continue anyway'],['file','Upload HTML file'],['text','Paste JD text']].map(([val,label])=>(
+            <button key={val} onClick={()=>setMode(val as 'none'|'file'|'text')} style={{padding:'8px 14px',borderRadius:4,border:`2px solid ${mode===val?'#0f0f0f':'#d6d0c4'}`,background:mode===val?'#0f0f0f':'transparent',color:mode===val?'#fff':'#7a7469',fontWeight:600,fontSize:12,cursor:'pointer'}}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode==='file'&&(
+          <div>
+            <input ref={fileRef} type="file" accept=".html,.htm,.txt" style={{display:'none'}} onChange={handleFile}/>
+            <div onClick={()=>fileRef.current?.click()} style={{border:'2px dashed #d6d0c4',borderRadius:6,padding:'16px 20px',textAlign:'center',cursor:'pointer',marginBottom:8}}>
+              <Upload size={20} color="#7a7469" style={{marginBottom:6}}/>
+              <div style={{fontSize:13,fontWeight:600}}>{fileName||'Choose HTML or TXT file'}</div>
+            </div>
+          </div>
+        )}
+        {mode==='text'&&(
+          <textarea value={jdText} onChange={e=>setJdText(e.target.value)} rows={7} placeholder="Paste the full job description text here..."
+            style={{width:'100%',padding:'9px 12px',border:'1.5px solid #d6d0c4',borderRadius:4,fontFamily:'DM Sans,sans-serif',fontSize:13,resize:'vertical',outline:'none'}}/>
+        )}
+        <p style={{fontSize:11,color:'#7a7469',marginTop:10}}>Neither is required — click Continue to add the card with available information.</p>
+      </div>
+      <div style={{padding:'14px 22px',borderTop:'1px solid #d6d0c4',display:'flex',gap:10,justifyContent:'flex-end',position:'sticky',bottom:0,background:'#fff'}}>
+        <button onClick={()=>onContinue(jdText)} style={{padding:'9px 18px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13}}>Continue</button>
+        <button onClick={onClose} style={{padding:'9px 16px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>Cancel</button>
+      </div>
+    </>
+  );
+}
+
+function JobCard({job,applied,onGenerate,generatingType,onReturnToExcluded}:{
+  job:SavedJob;applied:boolean;
+  onGenerate:(job:SavedJob,type:GenerateType)=>void;
+  generatingType?:GenerateType|null;
+  onReturnToExcluded?:(job:SavedJob)=>void;
+}) {
+  const [open,setOpen]=useState(false);
+  return (
+    <div style={{background:'#fff',border:`1px solid ${applied?'#b5882e':'#d6d0c4'}`,borderRadius:2,overflow:'hidden',transition:'box-shadow 0.2s,transform 0.2s'}}
+      onMouseEnter={e=>{(e.currentTarget as HTMLDivElement).style.boxShadow='4px 6px 0 #0f0f0f';(e.currentTarget as HTMLDivElement).style.transform='translate(-2px,-2px)';}}
+      onMouseLeave={e=>{(e.currentTarget as HTMLDivElement).style.boxShadow='';(e.currentTarget as HTMLDivElement).style.transform='';}}>
+      {applied&&<div style={{background:'#f2e8cb',padding:'4px 14px',fontSize:11,fontWeight:700,color:'#b5882e',letterSpacing:'0.06em',borderBottom:'1px solid #e8d89a',display:'flex',alignItems:'center',gap:6}}><CheckCircle size={11} fill="#b5882e" color="#b5882e"/>ALREADY APPLIED</div>}
+      <div style={{padding:'16px 18px 12px',cursor:'pointer',display:'flex',justifyContent:'space-between',gap:12}} onClick={()=>setOpen(!open)}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:11,letterSpacing:'0.1em',textTransform:'uppercase',fontWeight:700,color:'#c8460a',marginBottom:3,display:'flex',alignItems:'center',gap:5}}><Building2 size={11}/>{job.company}</div>
+          <div style={{fontFamily:'DM Serif Display,serif',fontSize:17,color:'#0f0f0f',lineHeight:1.2,marginBottom:8}}>{job.title}</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:5}}>
+            {job.isRemote&&<span style={{background:'#d6ede2',color:'#2a6644',fontSize:10,fontWeight:700,letterSpacing:'0.06em',textTransform:'uppercase',padding:'2px 7px',borderRadius:3,display:'flex',alignItems:'center',gap:3}}><MapPin size={9}/>Remote</span>}
+            {job.isHybrid&&<span style={{background:'#f2e8cb',color:'#b5882e',fontSize:10,fontWeight:700,letterSpacing:'0.06em',padding:'2px 7px',borderRadius:3,display:'flex',alignItems:'center',gap:3}}><MapPin size={9}/>Hybrid{(job as SavedJob&{location?:string}).location&&(job as SavedJob&{location?:string}).location!=='N/A'&&(job as SavedJob&{location?:string}).location!==''?` · ${(job as SavedJob&{location?:string}).location}`:''}</span>}
+            {(job as SavedJob&{isOnsite?:boolean;location?:string}).isOnsite&&<span style={{background:'#e8e4f5',color:'#4a1a80',fontSize:10,fontWeight:700,letterSpacing:'0.06em',padding:'2px 7px',borderRadius:3,display:'flex',alignItems:'center',gap:3}}><Building2 size={9}/>Office{(job as SavedJob&{location?:string}).location&&(job as SavedJob&{location?:string}).location!=='N/A'&&(job as SavedJob&{location?:string}).location!==''?` · ${(job as SavedJob&{location?:string}).location}`:''}</span>}
+            {(job.industry||[]).map(ind=><span key={ind} style={{background:'#dde8f5',color:'#1a4fd8',fontSize:10,fontWeight:700,letterSpacing:'0.06em',textTransform:'uppercase',padding:'2px 7px',borderRadius:3}}>{ind}</span>)}
+          </div>
+          <div style={{marginTop:9,fontSize:11,color:'#7a7469',display:'flex',alignItems:'center',gap:4}}>
+            {open?<ChevronUp size={11}/>:<ChevronDown size={11}/>}{open?'Hide details':'View full details'}
+          </div>
+        </div>
+        <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:7,flexShrink:0}}>
+          <div style={{width:48,height:48,borderRadius:'50%',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',fontWeight:700,
+            ...(job.rating>=8?{background:'#d6ede2',color:'#2a6644',border:'2px solid #2a6644'}:job.rating>=6?{background:'#f2e8cb',color:'#b5882e',border:'2px solid #b5882e'}:{background:'#f5d5c8',color:'#c8460a',border:'2px solid #c8460a'})}}>
+            <Star size={9} fill="currentColor"/><span style={{fontSize:14,lineHeight:1}}>{job.rating}</span>
+          </div>
+          <div style={{textAlign:'right'}}>
+            <div style={{fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:3,justifyContent:'flex-end'}}><DollarSign size={11}/>{job.salaryDisplay}</div>
+            <div style={{fontSize:10,color:'#7a7469'}}>{job.salaryNote}</div>
+          </div>
+        </div>
+      </div>
+      {open&&(
+        <div style={{borderTop:'1px solid #d6d0c4',padding:'16px 18px',background:'#faf9f6'}}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:16,marginBottom:16}}>
+            <div><div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:5}}>Role Summary</div><p style={{fontSize:13,color:'#3a3730',lineHeight:1.65}}>{job.roleSummary}</p></div>
+            <div><div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:5}}>Why You Fit ({job.rating}/10)</div><ul style={{paddingLeft:15,fontSize:13,color:'#3a3730',lineHeight:1.65}}>{(job.whyYouFit||[]).map((b,i)=><li key={i} style={{marginBottom:2}}>{b}</li>)}</ul></div>
+            <div><div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:5}}>Requirements</div><ul style={{paddingLeft:15,fontSize:13,color:'#3a3730',lineHeight:1.65}}>{(job.requirements||[]).map((r,i)=><li key={i} style={{marginBottom:2}}>{r}</li>)}</ul></div>
+            <div>
+              <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:5}}>Company Info</div>
+              <p style={{fontSize:13,color:'#3a3730',lineHeight:1.65,marginBottom:8}}>{job.companyInfo}</p>
+              {job.goldFlags?.length>0&&<div style={{marginBottom:6}}><div style={{fontSize:10,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#2a6644',marginBottom:3,display:'flex',alignItems:'center',gap:4}}><Flag size={10} fill="#2a6644"/>Gold Flags</div><ul style={{paddingLeft:15,fontSize:12,color:'#2a6644',lineHeight:1.6}}>{job.goldFlags.map((f,i)=><li key={i}>{f}</li>)}</ul></div>}
+              {job.redFlags?.length>0&&<div><div style={{fontSize:10,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',color:'#c8460a',marginBottom:3,display:'flex',alignItems:'center',gap:4}}><Flag size={10} fill="#c8460a"/>Red Flags</div><ul style={{paddingLeft:15,fontSize:12,color:'#c8460a',lineHeight:1.6}}>{job.redFlags.map((f,i)=><li key={i}>{f}</li>)}</ul></div>}
+            </div>
+          </div>
+          <div style={{borderTop:'1px solid #d6d0c4',paddingTop:12,display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+            <a href={job.applyUrl} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',gap:5,padding:'7px 13px',background:'#0f0f0f',color:'#fff',borderRadius:4,fontSize:12,fontWeight:600,textDecoration:'none'}}><ExternalLink size={12}/>Apply</a>
+            <a href={job.careersUrl} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',gap:5,padding:'7px 13px',border:'1.5px solid #d6d0c4',borderRadius:4,fontSize:12,fontWeight:600,textDecoration:'none',color:'#0f0f0f'}}><Briefcase size={12}/>Careers</a>
+            <a href={job.aboutUrl} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',gap:5,padding:'7px 13px',border:'1.5px solid #d6d0c4',borderRadius:4,fontSize:12,fontWeight:600,textDecoration:'none',color:'#0f0f0f'}}><ExternalLink size={12}/>About</a>
+            <div style={{marginLeft:'auto',display:'flex',gap:8,flexWrap:'wrap'}}>
+              <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:3}}>
+                <button onClick={()=>onGenerate(job,'resume')} disabled={generatingType==='resume'} style={{display:'flex',alignItems:'center',gap:5,padding:'7px 13px',background:'#dde8f5',color:'#1a4fd8',border:'none',borderRadius:4,fontSize:12,fontWeight:600,cursor:'pointer'}}>
+                  <FileText size={13} fill="#1a4fd8"/>{generatingType==='resume'?'Generating...':'Create Resume'}
+                </button>
+                {generatingType==='resume'&&<span style={{fontSize:10,color:'#b5882e',fontWeight:600}}>generation in progress...</span>}
+              </div>
+              <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:3}}>
+                <button onClick={()=>onGenerate(job,'coverLetter')} disabled={generatingType==='coverLetter'} style={{display:'flex',alignItems:'center',gap:5,padding:'7px 13px',background:'#f3e8ff',color:'#6b21a8',border:'none',borderRadius:4,fontSize:12,fontWeight:600,cursor:'pointer'}}>
+                  <Mail size={13} fill="#6b21a8"/>{generatingType==='coverLetter'?'Generating...':'Create Cover Letter'}
+                </button>
+                {generatingType==='coverLetter'&&<span style={{fontSize:10,color:'#b5882e',fontWeight:600}}>generation in progress...</span>}
+              </div>
+            </div>
+          </div>
+          <div style={{marginTop:9,paddingTop:9,borderTop:'1px solid #d6d0c4',fontSize:11,color:'#7a7469',display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+            <CheckCircle size={11}/>{job.auditLabel}<span>·</span><Clock size={11}/>{job.postedDate}<span>·</span>
+            <a href={job.jobDescUrl} target="_blank" rel="noreferrer" style={{color:'#1a4fd8',textDecoration:'none',display:'flex',alignItems:'center',gap:3}}><ExternalLink size={11}/>View JD</a>
+            {(job as SavedJob&{manuallyAdded?:boolean}).manuallyAdded&&onReturnToExcluded&&(
+              <><span>·</span><button onClick={(e)=>{e.stopPropagation();onReturnToExcluded(job);}} style={{background:'none',border:'none',cursor:'pointer',color:'#7a7469',fontSize:11,padding:0,display:'flex',alignItems:'center',gap:3,textDecoration:'underline'}}>Return to Excluded</button></>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Save/Import Modal ──────────────────────────────────────────────────────
+function SaveImportModal({onClose,onImportComplete}:{onClose:()=>void;onImportComplete:()=>void;}) {
+  const [phase,setPhase]=useState<'menu'|'importing'|'invalid'|'confirmOverwrite'>('menu');
+  const [pendingData,setPendingData]=useState<unknown>(null);
+  const fileRef=useRef<HTMLInputElement>(null);
+
+  const handleExport=()=>{
+    const data=exportAppData();
+    const json=JSON.stringify(data,null,2);
+    const blob=new Blob([json],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    const ts=new Date().toISOString().slice(0,10);
+    a.href=url;a.download=`ux-job-board-${ts}.json`;a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleFileSelect=async(e:React.ChangeEvent<HTMLInputElement>)=>{
+    const f=e.target.files?.[0]; if(!f) return;
+    setPhase('importing');
+    try{
+      await new Promise(r=>setTimeout(r,1200)); // show loading screen
+      const text=await f.text();
+      const parsed=JSON.parse(text);
+      if(!validateImport(parsed)){setPhase('invalid');return;}
+      setPendingData(parsed);
+      setPhase('confirmOverwrite');
+    }catch{setPhase('invalid');}
+    if(fileRef.current) fileRef.current.value='';
+  };
+
+  const doImport=()=>{
+    if(!pendingData) return;
+    importAppData(pendingData as Parameters<typeof importAppData>[0]);
+    onImportComplete();
+    onClose();
+  };
+
+  if(phase==='importing') return (
+    <div style={{position:'fixed',inset:0,background:'#000',zIndex:1100,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:24}}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="https://cdn.dribbble.com/userupload/19917114/file/original-880f3ab68d9bcfe041db6649d5f8003b.gif" alt="Loading" style={{width:200,height:200,objectFit:'contain',borderRadius:8}}/>
+      <div style={{fontFamily:'DM Serif Display,serif',fontSize:20,color:'rgba(255,255,255,0.9)'}}>Applying your file...</div>
+      <div style={{fontSize:13,color:'rgba(255,255,255,0.5)'}}>Validating import data</div>
+    </div>
+  );
+
+  if(phase==='invalid') return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:1100,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#fff',borderRadius:4,maxWidth:380,width:'100%',padding:28,textAlign:'center',boxShadow:'0 8px 32px rgba(0,0,0,0.2)'}}>
+        <AlertTriangle size={36} color="#c8460a" style={{marginBottom:14}}/>
+        <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:22,marginBottom:10}}>File is Not Valid</h2>
+        <p style={{fontSize:13,color:'#5a5449',lineHeight:1.7,marginBottom:20}}>This file doesn't appear to be a valid UX Job Board export. No settings were changed.</p>
+        <button onClick={()=>setPhase('menu')} style={{padding:'10px 24px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:14}}>Try Again</button>
+        <button onClick={onClose} style={{marginLeft:10,padding:'10px 20px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:14}}>Cancel</button>
+      </div>
+    </div>
+  );
+
+  if(phase==='confirmOverwrite') return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:1100,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#fff',borderRadius:4,maxWidth:440,width:'100%',padding:28,textAlign:'center',boxShadow:'0 8px 32px rgba(0,0,0,0.2)'}}>
+        <AlertTriangle size={36} color="#c8460a" style={{marginBottom:14}}/>
+        <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:22,marginBottom:10}}>Import Will Overwrite Everything</h2>
+        <p style={{fontSize:13,color:'#5a5449',lineHeight:1.7,marginBottom:20}}>
+          All current jobs, settings, instructions, profile data, and uploaded documents will be replaced with the imported file. This cannot be undone.
+        </p>
+        <div style={{display:'flex',gap:10,justifyContent:'center'}}>
+          <button onClick={doImport} style={{padding:'10px 22px',background:'#c8460a',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13}}>Continue — Import</button>
+          <button onClick={onClose} style={{padding:'10px 20px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // Menu state
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:520,boxShadow:'0 8px 32px rgba(0,0,0,0.14)'}}>
+        <div style={{padding:'20px 24px 14px',borderBottom:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:4}}>Portable Data</div>
+            <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:20}}>Save or Import Job Board</h2>
+          </div>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={20}/></button>
+        </div>
+        <div style={{padding:24,display:'grid',gap:14}}>
+          {/* Save option */}
+          <div style={{border:'1px solid #d6d0c4',borderRadius:6,padding:'18px 20px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:14}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:14,marginBottom:4,display:'flex',alignItems:'center',gap:7}}><FileText size={15}/>Save Current Job Board</div>
+                <p style={{fontSize:12,color:'#5a5449',lineHeight:1.65}}>
+                  Exports everything — jobs, applied history, instructions, profile, search history, and uploaded documents — to a portable <code style={{background:'#f5f2ec',padding:'1px 5px',borderRadius:3}}>json</code> file. API keys are included so the session is fully portable. Store this file securely.
+                </p>
+              </div>
+              <button onClick={handleExport} style={{flexShrink:0,padding:'9px 16px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',gap:6}}>
+                <Upload size={14}/>Export
+              </button>
+            </div>
+          </div>
+          {/* Import option */}
+          <div style={{border:'1px solid #d6d0c4',borderRadius:6,padding:'18px 20px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:14}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:14,marginBottom:4,display:'flex',alignItems:'center',gap:7}}><Upload size={15}/>Import Job Board</div>
+                <p style={{fontSize:12,color:'#5a5449',lineHeight:1.65}}>
+                  Load a previously exported <code style={{background:'#f5f2ec',padding:'1px 5px',borderRadius:3}}>json</code> file. Everything in the app will be replaced with the imported session. You will be warned before anything is overwritten.
+                </p>
+              </div>
+              <button onClick={()=>fileRef.current?.click()} style={{flexShrink:0,padding:'9px 16px',background:'transparent',color:'#0f0f0f',border:'1.5px solid #d6d0c4',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',gap:6}}>
+                <Upload size={14}/>Import
+              </button>
+            </div>
+            <input ref={fileRef} type="file" accept=".json" style={{display:'none'}} onChange={handleFileSelect}/>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Terms & Conditions Modal ───────────────────────────────────────────────
+function TermsModal({onClose}:{onClose:()=>void;}) {
+  const sections=[
+    {
+      title:'1. Overview',
+      body:`This application ("UX Job Board," "the App") is a personal productivity tool developed and operated by Ape X LLC ("Developer," "we," "us"). By accessing or using the App, you agree to be bound by these Terms and Conditions. If you do not agree, do not use the App.`,
+    },
+    {
+      title:'2. Nature of the Application',
+      body:`The App is a client-side web application designed to assist users in discovering, tracking, and applying to UX leadership job opportunities. The App interfaces with third-party services including the Anthropic Claude API and Serper search API to perform job searches and generate application documents. The Developer is not a recruiter, staffing agency, or employment service of any kind.`,
+    },
+    {
+      title:'3. No Employment Guarantee',
+      body:`The App does not guarantee employment outcomes. Job listings surfaced by the App are sourced from third-party job boards and search engines. Ape X LLC makes no representations regarding the accuracy, completeness, timeliness, or availability of any job listing, salary estimate, or company information presented in the App. All job data should be independently verified before acting upon it.`,
+    },
+    {
+      title:'4. Local Storage & Data Handling',
+      body:`The App stores all user data exclusively in your browser's localStorage. This includes: your candidate profile, uploaded resume and cover letter content, job search results, application history, instruction sets, search history, and API keys. No data is transmitted to or stored on any Ape X LLC servers. The Developer has no access to your stored data. When you clear your browser data or use the Reset All function, all stored data is permanently deleted. It is your responsibility to export and back up your data using the Save/Import feature.`,
+    },
+    {
+      title:'5. API Keys & Third-Party Services',
+      body:`You are solely responsible for obtaining, securing, and managing your own API keys for Anthropic and Serper. API keys are stored in your browser's localStorage and, if exported, in your export file. Treat your API keys as passwords — do not share them or store them in unsecured locations. Ape X LLC is not responsible for unauthorized use of your API keys, charges incurred through your API accounts, or changes to third-party API pricing, availability, or terms of service. Your use of those services is governed by their respective terms.`,
+    },
+    {
+      title:'6. Intellectual Property',
+      body:`The App's source code, design, and original content are the intellectual property of Ape X LLC. Job listings, company information, and external content remain the property of their respective owners. The App does not claim ownership over any third-party content it surfaces. Generated resume and cover letter documents are produced based on your own input data and templates; you retain all rights to documents generated using your own materials.`,
+    },
+    {
+      title:'7. Disclaimer of Warranties',
+      body:`THE APP IS PROVIDED "AS IS" AND "AS AVAILABLE" WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. APE X LLC DOES NOT WARRANT THAT THE APP WILL BE UNINTERRUPTED, ERROR-FREE, OR FREE OF HARMFUL COMPONENTS. YOUR USE OF THE APP IS ENTIRELY AT YOUR OWN RISK.`,
+    },
+    {
+      title:'8. Limitation of Liability',
+      body:`TO THE FULLEST EXTENT PERMITTED BY APPLICABLE LAW, APE X LLC AND ITS MEMBERS, OFFICERS, EMPLOYEES, AND AGENTS SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES ARISING FROM YOUR USE OF OR INABILITY TO USE THE APP, INCLUDING BUT NOT LIMITED TO LOSS OF DATA, LOSS OF EMPLOYMENT OPPORTUNITIES, OR LOSS OF BUSINESS, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. IN NO EVENT SHALL APE X LLC'S TOTAL LIABILITY EXCEED $0, AS THE APP IS PROVIDED FREE OF CHARGE.`,
+    },
+    {
+      title:'9. Indemnification',
+      body:`You agree to indemnify, defend, and hold harmless Ape X LLC and its members, officers, employees, and agents from and against any claims, liabilities, damages, losses, and expenses, including reasonable legal fees, arising out of or in any way connected with: (a) your access to or use of the App; (b) your violation of these Terms; (c) your violation of any third-party right, including any intellectual property or privacy right; or (d) any claim that your use of the App caused damage to a third party.`,
+    },
+    {
+      title:'10. Third-Party Services',
+      body:`The App integrates with Anthropic's Claude API and Serper's search API. Your use of these services is subject to their own terms of service and privacy policies. Ape X LLC is not affiliated with, endorsed by, or in partnership with Anthropic, Serper, or any job board or employer whose listings may appear in the App. Links to third-party websites are provided for convenience only; Ape X LLC does not endorse and is not responsible for the content of those sites.`,
+    },
+    {
+      title:'11. Privacy',
+      body:`The App does not collect, transmit, or store any personal data on external servers. All data remains in your browser's localStorage on your device. The App does not use cookies, tracking pixels, analytics services, or advertising. The only external network requests made by the App are direct API calls to Anthropic and Serper using your own API keys, and web search requests to Serper on your behalf when you initiate a job search.`,
+    },
+    {
+      title:'12. Modifications',
+      body:`Ape X LLC reserves the right to modify these Terms at any time. Continued use of the App following any modification constitutes acceptance of the revised Terms. It is your responsibility to review these Terms periodically.`,
+    },
+    {
+      title:'13. Governing Law',
+      body:`These Terms shall be governed by and construed in accordance with the laws of the State of Arizona, without regard to its conflict of law provisions. Any dispute arising from these Terms or your use of the App shall be subject to the exclusive jurisdiction of the state and federal courts located in Maricopa County, Arizona.`,
+    },
+    {
+      title:'14. Contact',
+      body:`For questions regarding these Terms, please contact Ape X LLC through the developer's portfolio at uxapex.com.`,
+    },
+  ];
+
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:'24px',overflow:'hidden'}}>
+      <div style={{background:'#fff',borderRadius:6,width:'100%',maxWidth:720,maxHeight:'90vh',boxShadow:'0 16px 64px rgba(0,0,0,0.25)',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+        <div style={{padding:'24px 28px 18px',borderBottom:'3px solid #0f0f0f',display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexShrink:0}}>
+          <div>
+            <div style={{fontSize:10,letterSpacing:'0.18em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:6}}>Legal</div>
+            <h1 style={{fontFamily:'DM Serif Display,serif',fontSize:26,fontWeight:400,lineHeight:1.1}}>Terms &amp; Conditions</h1>
+            <p style={{fontSize:12,color:'#7a7469',marginTop:6}}>Ape X LLC · UX Job Board Application · Last updated May 2026</p>
+          </div>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#777',padding:4,flexShrink:0}}><X size={22}/></button>
+        </div>
+        <div style={{padding:'24px 28px 32px',display:'flex',flexDirection:'column',gap:22,overflowY:'auto',flex:1}}>
+          <div style={{background:'#fff8f6',border:'1px solid #e8bead',borderRadius:4,padding:'12px 16px',fontSize:12,color:'#6b2200',lineHeight:1.7,flexShrink:0}}>
+            <strong>Please read these Terms carefully.</strong> By using the UX Job Board application, you acknowledge that you have read, understood, and agree to be bound by these Terms and Conditions and all applicable laws.
+          </div>
+          {sections.map(s=>(
+            <div key={s.title}>
+              <h3 style={{fontFamily:'DM Serif Display,serif',fontSize:16,fontWeight:400,marginBottom:8,color:'#0f0f0f'}}>{s.title}</h3>
+              <p style={{fontSize:13,color:'#3a3730',lineHeight:1.75}}>{s.body}</p>
+            </div>
+          ))}
+          <div style={{borderTop:'1px solid #d6d0c4',paddingTop:18,fontSize:12,color:'#7a7469',lineHeight:1.7}}>
+            These Terms and Conditions were last updated May 2026 and are effective immediately. By continuing to use the UX Job Board application, you agree to these terms in their entirety.
+          </div>
+        </div>
+        <div style={{padding:'16px 28px',borderTop:'1px solid #d6d0c4',display:'flex',justifyContent:'flex-end',flexShrink:0,background:'#fff'}}>
+          <button onClick={onClose} style={{padding:'10px 24px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:14}}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── Main App ───────────────────────────────────────────────────────────────
+export default function Home() {
+  const [tab,setTab]=useState<Tab>('search');
+  const [jobs,setJobs]=useState<SavedJob[]>([]);
+  const [excludedJobs,setExcludedJobs]=useState<ExcludedJob[]>([]);
+  const [appliedJobs,setAppliedJobs]=useState<AppliedJob[]>([]);
+  const [searching,setSearching]=useState(false);
+  const [searchError,setSearchError]=useState('');
+  const [showHowTo,setShowHowTo]=useState(false);
+  const [showSpecial,setShowSpecial]=useState(false);
+  const [showReset,setShowReset]=useState(false);
+  const [showClearBoard,setShowClearBoard]=useState(false);
+  const [showWizard,setShowWizard]=useState(false);
+  const [showSuccess,setShowSuccess]=useState(false);
+  const [showMobileFAB,setShowMobileFAB]=useState(false);
+  const [showHistory,setShowHistory]=useState(false);
+  const [showHistoryFull,setShowHistoryFull]=useState(false);
+  const [showDeleteOldest,setShowDeleteOldest]=useState(false);
+  const [showManageHistory,setShowManageHistory]=useState(false);
+  const [pendingSearch,setPendingSearch]=useState(false);
+  const [analyzingJob,setAnalyzingJob]=useState<string|null>(null);
+  const [analyzeModal,setAnalyzeModal]=useState<ExcludedJob|null>(null);
+  const [analyzeResult,setAnalyzeResult]=useState<Record<string,unknown>|null>(null);
+  const [analyzeLoadingVisible,setAnalyzeLoadingVisible]=useState(false);
+  const [searchHistory,setSearchHistory]=useState<SearchSnapshot[]>([]);
+  const [resetInstrTarget,setResetInstrTarget]=useState<'jobSearch'|'resume'|'coverLetter'|null>(null);
+  const [specialInstructions,setSpecialInstructions]=useState('');
+  const [generateModal,setGenerateModal]=useState<{job:SavedJob;type:GenerateType}|null>(null);
+  const [generatingJobs]=useState<Record<string,GenerateType>>({});
+  const [addStatusModal,setAddStatusModal]=useState<string|null>(null);
+  const [filterCat,setFilterCat]=useState('all');
+  const [filterRemote,setFilterRemote]=useState(false);
+  const [sortBy,setSortBy]=useState<'salary'|'rating'>('salary');
+  const [jobSearchInstr,setJobSearchInstr]=useState('');
+  const [resumeInstr,setResumeInstr]=useState('');
+  const [coverInstr,setCoverInstr]=useState('');
+  const [anthropicKey,setAnthropicKey]=useState('');
+  const [serperKey,setSerperKey]=useState('');
+  const [keysSaved,setKeysSaved]=useState(false);
+  const [instrSaved,setInstrSaved]=useState<string|null>(null);
+  const [copied,setCopied]=useState<string|null>(null);
+  const [resumeMeta,setResumeMeta]=useState<UploadMeta|null>(null);
+  const [coverMeta,setCoverMeta]=useState<UploadMeta|null>(null);
+  const [profile,setProfile]=useState<CandidateProfile>(DEFAULT_PROFILE);
+  const [historyToDelete,setHistoryToDelete]=useState<Set<string>>(new Set());
+  const [showSaveImport,setShowSaveImport]=useState(false);
+  const [showTerms,setShowTerms]=useState(false);
+  const abortRef=useRef(false);
+
+  useEffect(()=>{
+    const saved=getSavedInstructions();
+    setJobSearchInstr(saved?.jobSearch||DEFAULT_JOB_SEARCH_INSTRUCTIONS);
+    setResumeInstr(saved?.resume||DEFAULT_RESUME_INSTRUCTIONS);
+    setCoverInstr(saved?.coverLetter||DEFAULT_COVER_LETTER_INSTRUCTIONS);
+    setJobs(getSavedJobs()); setAppliedJobs(getAppliedJobs());
+    setAnthropicKey(getLocalApiKey()); setSerperKey(getLocalSerperKey());
+    setResumeMeta(getUploadedResumeMeta()); setCoverMeta(getUploadedCoverMeta());
+    const p=getSavedProfile(); if(p) setProfile(p);
+    setSearchHistory(getSearchHistory());
+  },[]);
+
+  useEffect(()=>{if(tab==='applied')setAppliedJobs(getAppliedJobs());},[tab]);
+  useEffect(()=>{if(!generateModal)setAppliedJobs(getAppliedJobs());},[generateModal]);
+  useEffect(()=>{if(!addStatusModal)setAppliedJobs(getAppliedJobs());},[addStatusModal]);
+
+  const doRunSearch=async()=>{
+    setSearchError('');abortRef.current=false;setSearching(true);
+    try{
+      const res=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({instructions:jobSearchInstr,specialInstructions,apiKeyOverride:anthropicKey,serperKeyOverride:serperKey})});
+      if(abortRef.current) return;
+      const data=await res.json();
+      if(!res.ok){setSearchError(data.error||'Search failed.');return;}
+      const live=(data.jobs||[]).filter((j:SavedJob|ExcludedJob)=>!j.excluded) as SavedJob[];
+      const excl=(data.jobs||[]).filter((j:SavedJob|ExcludedJob)=>j.excluded) as ExcludedJob[];
+      setJobs(live);setExcludedJobs(excl);setSavedJobs(live);
+      setLastSearchQuery(jobSearchInstr);
+
+      // Auto-save to history
+      const snap:SearchSnapshot={
+        id:`search-${Date.now()}`,
+        title:profile.targetTitles.slice(0,2).join(' / ')||'UX Leadership Search',
+        timestamp:new Date().toISOString(),
+        jobs:live,
+        excludedJobs:excl as ExcludedJobSnapshot[],
+        searchMeta:{
+          targetTitles:profile.targetTitles,
+          workTypes:profile.workTypes,
+          locations:profile.locations,
+          salaryMin:profile.salaryMin,
+          salaryMax:profile.salaryMax,
+          jobCount:live.length,
+        },
+      };
+      saveSearchToHistory(snap);
+      setSearchHistory(getSearchHistory());
+      setTab('board');
+    }catch(e:unknown){if(!abortRef.current)setSearchError(e instanceof Error?e.message:'Unknown error');}
+    finally{setSearching(false);}
+  };
+
+  const runSearch=async()=>{
+    if(isHistoryFull()){
+      setShowHistoryFull(true);
+      setPendingSearch(true);
+      return;
+    }
+    await doRunSearch();
+  };
+
+  const handleUpload=async(file:File,type:'resume'|'cover')=>{
+    const content=await parseFile(file);
+    const ext=file.name.split('.').pop()?.toLowerCase() as UploadMeta['fileType'];
+    const meta:UploadMeta={filename:file.name,uploadedAt:new Date().toISOString(),fileType:ext};
+    if(type==='resume'){setUploadedResume(content,meta);setResumeMeta(meta);}
+    else{setUploadedCover(content,meta);setCoverMeta(meta);}
+  };
+
+  // Open modal immediately, start background analysis after modal renders
+  const openAddToBoard=(excl:ExcludedJob)=>{
+    analyzeResultRef.current=null;
+    setAnalyzeResult(null);
+    setAnalyzeModal(excl);
+    setAnalyzingJob(excl.id);
+    // Fire analysis in background
+    fetch('/api/analyze-job',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        company:excl.company,title:excl.title,
+        applyUrl:excl.applyUrl,jobDescUrl:excl.jobDescUrl,careersUrl:excl.careersUrl,
+        candidateProfile:profile,jdText:'',apiKeyOverride:anthropicKey,
+      }),
+    }).then(r=>r.json()).then(data=>{
+      analyzeResultRef.current=data;
+      setAnalyzeResult(data);
+      setAnalyzingJob(null);
+    }).catch(()=>{
+      const errResult={error:true};
+      analyzeResultRef.current=errResult;
+      setAnalyzeResult(errResult);
+      setAnalyzingJob(null);
+    });
+  };
+
+  const promoteToBoard=(excl:ExcludedJob,jdText:string,analysisData:Record<string,unknown>|null)=>{
+    const analysis=(analysisData&&!analysisData.error)?analysisData.analysis as Record<string,unknown>:{};
+    const promoted:SavedJob={
+      id:excl.id,company:excl.company,title:excl.title,
+      category:(analysis.category as string)||excl.category||'director',
+      isRemote:(analysis.isRemote as boolean)??excl.isRemote??false,
+      isHybrid:(analysis.isHybrid as boolean)??excl.isHybrid??false,
+      isOnsite:(analysis.isOnsite as boolean)??false,
+      location:(analysis.location as string)||'',
+      industry:(analysis.industry as string[])||excl.industry||[],
+      salaryMin:(analysis.salaryMin as number)||excl.salaryMin||0,
+      salaryMax:(analysis.salaryMax as number)||excl.salaryMax||0,
+      salaryDisplay:(analysis.salaryDisplay as string)||excl.salaryDisplay||'N/A',
+      salaryNote:(analysis.salaryNote as string)||excl.salaryNote||'Estimated',
+      rating:(analysis.rating as number)||excl.rating||6,
+      auditLabel:'⚠️ Manually Added',
+      roleSummary:(analysis.roleSummary as string)||excl.roleSummary||'',
+      whyYouFit:(analysis.whyYouFit as string[])||excl.whyYouFit||[],
+      requirements:(analysis.requirements as string[])||excl.requirements||[],
+      companyInfo:(analysis.companyInfo as string)||excl.companyInfo||'',
+      goldFlags:(analysis.goldFlags as string[])||excl.goldFlags||[],
+      redFlags:(analysis.redFlags as string[])||excl.redFlags||[],
+      applyUrl:excl.applyUrl||'#',careersUrl:excl.careersUrl||'#',
+      aboutUrl:excl.careersUrl||'#',jobDescUrl:excl.jobDescUrl||'#',
+      postedDate:excl.postedDate||'',excluded:false,
+      manuallyAdded:true,
+      originalExclusion:{layerFailed:excl.layerFailed,reason:excl.reason},
+    } as SavedJob & {isOnsite?:boolean;location?:string;manuallyAdded?:boolean;originalExclusion?:{layerFailed:string;reason:string}};
+    const updated=[...jobs,promoted];setJobs(updated);setSavedJobs(updated);
+    setExcludedJobs(prev=>prev.filter(j=>j.id!==excl.id));
+    setAnalyzeModal(null);setAnalyzeResult(null);setAnalyzingJob(null);
+    setAnalyzeLoadingVisible(false);
+  };
+
+  const analyzeResultRef=useRef<Record<string,unknown>|null>(null);
+  const handleContinueAddToBoard=(jdText:string)=>{
+    if(!analyzeModal) return;
+    const excl=analyzeModal;
+    if(analyzingJob===excl.id){
+      // Analysis still running — show loading screen, wait for result
+      setAnalyzeLoadingVisible(true);
+      const interval=setInterval(()=>{
+        const result=analyzeResultRef.current;
+        if(result!==null){
+          clearInterval(interval);
+          promoteToBoard(excl,jdText,result);
+        }
+      },300);
+    } else {
+      // Analysis already done
+      promoteToBoard(excl,jdText,analyzeResult);
+    }
+  };
+
+  const returnToExcluded=(job:SavedJob)=>{
+    const orig=(job as SavedJob&{originalExclusion?:{layerFailed:string;reason:string}}).originalExclusion;
+    const excluded:ExcludedJob={
+      id:job.id,company:job.company,title:job.title,
+      layerFailed:orig?.layerFailed||'Layer 1',
+      reason:orig?.reason||'Manually removed from board',
+      excluded:true,
+      applyUrl:job.applyUrl,careersUrl:job.careersUrl,jobDescUrl:job.jobDescUrl,
+      category:job.category,isRemote:job.isRemote,isHybrid:job.isHybrid,
+      industry:job.industry,salaryDisplay:job.salaryDisplay,rating:job.rating,
+    };
+    setExcludedJobs(prev=>[...prev,excluded]);
+    const updated=jobs.filter(j=>j.id!==job.id);
+    setJobs(updated);setSavedJobs(updated);
+  };
+
+
+  const saveInstrs=(which:'jobSearch'|'resume'|'coverLetter')=>{
+    const obj=getSavedInstructions()||{jobSearch:jobSearchInstr,resume:resumeInstr,coverLetter:coverInstr};
+    if(which==='jobSearch')obj.jobSearch=jobSearchInstr;
+    if(which==='resume')obj.resume=resumeInstr;
+    if(which==='coverLetter')obj.coverLetter=coverInstr;
+    saveInstructions(obj);setInstrSaved(which);setTimeout(()=>setInstrSaved(null),2500);
+  };
+
+  const copyInstrs=async(which:'jobSearch'|'resume'|'coverLetter')=>{
+    const text=which==='jobSearch'?jobSearchInstr:which==='resume'?resumeInstr:coverInstr;
+    await navigator.clipboard.writeText(text);
+    setCopied(which);setTimeout(()=>setCopied(null),2000);
+  };
+
+  const resetSingleInstr=(which:'jobSearch'|'resume'|'coverLetter')=>{
+    const def=which==='jobSearch'?buildJobSearchInstructions(profile):which==='resume'?buildResumeInstructions(profile):buildCoverLetterInstructions(profile);
+    if(which==='jobSearch')setJobSearchInstr(def);
+    if(which==='resume')setResumeInstr(def);
+    if(which==='coverLetter')setCoverInstr(def);
+    saveInstrs(which);setResetInstrTarget(null);
+  };
+
+  const doReset=()=>{
+    clearAllStorage(); // wipes ALL localStorage — nothing survives
+    // Reset every piece of React state to blank defaults
+    setJobs([]);
+    setExcludedJobs([]);
+    setAppliedJobs([]);
+    setSearchHistory([]);
+    setJobSearchInstr(DEFAULT_JOB_SEARCH_INSTRUCTIONS);
+    setResumeInstr(DEFAULT_RESUME_INSTRUCTIONS);
+    setCoverInstr(DEFAULT_COVER_LETTER_INSTRUCTIONS);
+    setAnthropicKey('');
+    setSerperKey('');
+    setResumeMeta(null);
+    setCoverMeta(null);
+    setProfile(DEFAULT_PROFILE);
+    setSpecialInstructions('');
+    setFilterCat('all');
+    setFilterRemote(false);
+    setSortBy('salary');
+    setShowReset(false);
+    setTab('search');
+  };
+
+  const onWizardComplete=(p:CandidateProfile,anthKey:string,serpKey:string)=>{
+    setProfile(p);
+    setAnthropicKey(anthKey); setSerperKey(serpKey);
+    setJobSearchInstr(buildJobSearchInstructions(p));
+    setResumeInstr(buildResumeInstructions(p));
+    setCoverInstr(buildCoverLetterInstructions(p));
+    setShowWizard(false);setShowSuccess(true);
+  };
+
+  const displayJobs=jobs
+    .filter(j=>filterCat==='all'||j.category===filterCat)
+    .filter(j=>!filterRemote||j.isRemote)
+    .sort((a,b)=>sortBy==='salary'?(b.salaryMax||0)-(a.salaryMax||0):b.rating-a.rating);
+  const srDir=displayJobs.filter(j=>j.category==='senior-director');
+  const dir=displayJobs.filter(j=>j.category==='director');
+  const mgr=displayJobs.filter(j=>j.category==='manager');
+
+  const instrName=(k:'jobSearch'|'resume'|'coverLetter')=>k==='jobSearch'?'Job Search Instructions':k==='resume'?'Resume Instructions':'Cover Letter Instructions';
+
+  return (
+    <div style={{minHeight:'100vh',background:'#f5f2ec',display:'flex',flexDirection:'column'}}>
+      <style>{`
+        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+        @keyframes slideInRight{from{transform:translateX(100%)}to{transform:translateX(0)}}
+        @keyframes slideUpSheet{from{transform:translateY(100%)}to{transform:translateY(0)}}
+        *{box-sizing:border-box;}
+        ::-webkit-scrollbar{width:5px;}
+        ::-webkit-scrollbar-thumb{background:#d6d0c4;border-radius:3px;}
+        @media(max-width:767px){
+          .nav-label{display:none!important;}
+          .main-pad{padding:24px 14px 60px!important;}
+          .header-inner{padding:0 12px!important;}
+          .wizard-grid{grid-template-columns:1fr!important;}
+        }
+        @media(min-width:768px){.mobile-only{display:none!important;}}
+      `}</style>
+
+      {searching&&<LoadingOverlay onCancel={()=>{abortRef.current=true;setSearching(false);}} minutesEta={6}/>}
+      {showHowTo&&<HowToDrawer onClose={()=>setShowHowTo(false)}/>}
+      {showSpecial&&<SpecialModal value={specialInstructions} onChange={setSpecialInstructions} onClose={()=>setShowSpecial(false)}/>}
+      {showReset&&<ConfirmModal title="Are you certain?" body="This will reset ALL data including saved jobs, applied history, uploaded templates, API keys, profile, and all instructions. This is not reversible." confirmLabel="Reset Everything" onConfirm={doReset} onClose={()=>setShowReset(false)}/>}
+      {resetInstrTarget&&<ConfirmModal title="Reset Instructions?" body={`This will reset your ${instrName(resetInstrTarget)} to the profile-based default. This is not reversible.`} confirmLabel="Reset" onConfirm={()=>resetSingleInstr(resetInstrTarget)} onClose={()=>setResetInstrTarget(null)}/>}
+      {showWizard&&<SetupWizard initialProfile={profile} initialAnthropicKey={anthropicKey} initialSerperKey={serperKey} onComplete={onWizardComplete} onClose={()=>setShowWizard(false)} onOpenHowTo={()=>setShowHowTo(true)}/>}
+      {showSuccess&&<SuccessModal onSearch={()=>{setShowSuccess(false);runSearch();}} onClose={()=>setShowSuccess(false)}/>}
+      {showMobileFAB&&<MobileFAB instructions={jobSearchInstr} onClose={()=>setShowMobileFAB(false)}/>}
+      {generateModal&&<GenerateModal job={generateModal.job} type={generateModal.type} instructions={generateModal.type==='resume'?resumeInstr:coverInstr} apiKey={anthropicKey} onClose={()=>setGenerateModal(null)}/>}
+      {addStatusModal&&<AddStatusModal jobId={addStatusModal} onClose={()=>setAddStatusModal(null)}/>}
+      {showClearBoard&&<ConfirmModal title="Delete All Jobs?" body="This will permanently remove all jobs from the board. This cannot be undone." confirmLabel="Delete" onConfirm={()=>{clearSavedJobs();setJobs([]);setExcludedJobs([]);setShowClearBoard(false);}} onClose={()=>setShowClearBoard(false)}/>}
+      {showSaveImport&&<SaveImportModal onClose={()=>setShowSaveImport(false)} onImportComplete={()=>{window.location.reload();}}/>}
+      {showTerms&&<TermsModal onClose={()=>setShowTerms(false)}/>}
+
+      {/* History Full Modal */}
+      {showHistoryFull&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:800,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+          <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:440,boxShadow:'0 8px 32px rgba(0,0,0,0.2)',padding:28,textAlign:'center'}}>
+            <AlertTriangle size={36} color="#c8460a" style={{marginBottom:14}}/>
+            <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:22,marginBottom:8}}>Saved Search List Full</h2>
+            <p style={{fontSize:13,color:'#5a5449',lineHeight:1.7,marginBottom:24}}>You have 5 saved searches. Continuing will auto-delete the oldest search, or you can remove one of your choice.</p>
+            <div style={{display:'flex',gap:10,justifyContent:'center',flexWrap:'wrap'}}>
+              <button onClick={()=>{setShowHistoryFull(false);setShowDeleteOldest(true);}} style={{padding:'10px 16px',background:'#c8460a',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13}}>Proceed (delete oldest)</button>
+              <button onClick={()=>{setShowHistoryFull(false);setPendingSearch(false);}} style={{padding:'10px 16px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>Cancel</button>
+              <button onClick={()=>{setShowHistoryFull(false);setShowManageHistory(true);}} style={{padding:'10px 16px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13}}>Delete a Search</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Oldest Confirm */}
+      {showDeleteOldest&&<ConfirmModal title="Delete Oldest Search?" body="This will permanently delete your oldest saved search and cannot be undone." confirmLabel="Delete & Proceed" onConfirm={async()=>{deleteOldestSearch();setSearchHistory(getSearchHistory());setShowDeleteOldest(false);if(pendingSearch){setPendingSearch(false);await doRunSearch();}}} onClose={()=>{setShowDeleteOldest(false);setPendingSearch(false);}}/>}
+
+      {/* Manage History Modal */}
+      {showManageHistory&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:800,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+          <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:560,maxHeight:'80vh',overflowY:'auto',boxShadow:'0 8px 32px rgba(0,0,0,0.2)'}}>
+            <div style={{padding:'18px 22px 14px',borderBottom:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'#fff'}}>
+              <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:20}}>Manage Saved Searches</h2>
+              <button onClick={()=>{setShowManageHistory(false);setHistoryToDelete(new Set());}} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={19}/></button>
+            </div>
+            <div style={{padding:22}}>
+              <p style={{fontSize:12,color:'#c8460a',marginBottom:16,display:'flex',alignItems:'center',gap:6}}><AlertTriangle size={12}/>Deletion cannot be undone.</p>
+              {searchHistory.map(snap=>(
+                <div key={snap.id} style={{background:historyToDelete.has(snap.id)?'#fff8f6':'#f5f2ec',border:`1px solid ${historyToDelete.has(snap.id)?'#e8bead':'#e8e4dc'}`,borderRadius:4,padding:'12px 14px',marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:700,fontSize:13,marginBottom:3}}>{snap.title}</div>
+                    <div style={{fontSize:11,color:'#7a7469'}}>{new Date(snap.timestamp).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})} · {snap.searchMeta.jobCount} jobs</div>
+                  </div>
+                  <input type="checkbox" checked={historyToDelete.has(snap.id)} onChange={e=>{const s=new Set(historyToDelete);e.target.checked?s.add(snap.id):s.delete(snap.id);setHistoryToDelete(s);}} style={{width:16,height:16,cursor:'pointer',accentColor:'#c8460a'}}/>
+                </div>
+              ))}
+            </div>
+            <div style={{padding:'14px 22px',borderTop:'1px solid #d6d0c4',display:'flex',gap:10,justifyContent:'flex-end',position:'sticky',bottom:0,background:'#fff'}}>
+              {historyToDelete.size>0&&<button onClick={async()=>{historyToDelete.forEach(id=>deleteSearchFromHistory(id));setSearchHistory(getSearchHistory());setHistoryToDelete(new Set());setShowManageHistory(false);if(pendingSearch&&!isHistoryFull()){setPendingSearch(false);await doRunSearch();}}} style={{padding:'9px 16px',background:'#c8460a',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13}}>Delete Selected ({historyToDelete.size})</button>}
+              <button onClick={()=>{setShowManageHistory(false);setHistoryToDelete(new Set());setPendingSearch(false);}} style={{padding:'9px 16px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontWeight:600,fontSize:13}}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Saved Searches Modal */}
+      {showHistory&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:700,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+          <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:580,maxHeight:'80vh',overflowY:'auto',boxShadow:'0 8px 32px rgba(0,0,0,0.14)'}}>
+            <div style={{padding:'18px 22px 14px',borderBottom:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'#fff'}}>
+              <div>
+                <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:20,marginBottom:4}}>Saved Searches</h2>
+                <div style={{fontSize:11,color:'#7a7469'}}>{searchHistory.length} of 5 saved ({5-searchHistory.length} available)</div>
+              </div>
+              <button onClick={()=>setShowHistory(false)} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={19}/></button>
+            </div>
+            <div style={{padding:22}}>
+              {searchHistory.length===0?<p style={{fontSize:13,color:'#7a7469',textAlign:'center',padding:'24px 0'}}>No saved searches yet. Run a search to get started.</p>:searchHistory.map((snap,idx)=>(
+                <div key={snap.id} style={{border:'1px solid #d6d0c4',borderRadius:4,padding:'16px 18px',marginBottom:12}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,flexWrap:'wrap'}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>{snap.title}</div>
+                      <div style={{fontSize:11,color:'#7a7469',marginBottom:8}}>{new Date(snap.timestamp).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}</div>
+                      <div style={{display:'flex',flexWrap:'wrap',gap:5}}>
+                        <span style={{fontSize:10,fontWeight:700,background:'#dde8f5',color:'#1a4fd8',padding:'2px 7px',borderRadius:3}}>{snap.searchMeta.jobCount} verified jobs</span>
+                        <span style={{fontSize:10,fontWeight:700,background:'#f2e8cb',color:'#b5882e',padding:'2px 7px',borderRadius:3}}>{snap.searchMeta.workTypes.join(' · ')}</span>
+                        {snap.searchMeta.locations.slice(0,3).map(l=><span key={l} style={{fontSize:10,fontWeight:700,background:'#f5f2ec',color:'#5a5449',padding:'2px 7px',borderRadius:3}}>{l}</span>)}
+                        <span style={{fontSize:10,fontWeight:700,background:'#d6ede2',color:'#2a6644',padding:'2px 7px',borderRadius:3}}>${(snap.searchMeta.salaryMin/1000).toFixed(0)}K–${(snap.searchMeta.salaryMax/1000).toFixed(0)}K</span>
+                      </div>
+                      {snap.searchMeta.targetTitles.length>0&&<div style={{fontSize:11,color:'#5a5449',marginTop:6}}>{snap.searchMeta.targetTitles.slice(0,3).join(', ')}{snap.searchMeta.targetTitles.length>3&&` +${snap.searchMeta.targetTitles.length-3} more`}</div>}
+                    </div>
+                    <div style={{display:'flex',flexDirection:'column',gap:6,alignItems:'flex-end'}}>
+                      <button onClick={()=>{setJobs(snap.jobs);setExcludedJobs(snap.excludedJobs as ExcludedJob[]);setSavedJobs(snap.jobs);setShowHistory(false);setTab('board');}} style={{padding:'7px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:12,whiteSpace:'nowrap'}}>Restore</button>
+                      <button onClick={()=>{deleteSearchFromHistory(snap.id);setSearchHistory(getSearchHistory());}} style={{padding:'5px 10px',background:'transparent',color:'#c8460a',border:'1px solid #f5d5c8',borderRadius:4,cursor:'pointer',fontSize:11,fontWeight:600,display:'flex',alignItems:'center',gap:4}}><Trash2 size={11}/>Delete</button>
+                    </div>
+                  </div>
+                  {idx===searchHistory.length-1&&<div style={{fontSize:10,color:'#b5882e',marginTop:8,display:'flex',alignItems:'center',gap:4}}><AlertTriangle size={10}/>Oldest — will be auto-deleted if history is full</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Analyze JD fallback modal */}
+      {analyzeLoadingVisible&&(
+        <LoadingOverlay dismissOnly onDismiss={()=>setAnalyzeLoadingVisible(false)} minutesEta={0.5}
+          customMessage="Job being moved to board..."/>
+      )}
+      {analyzeModal&&!analyzeLoadingVisible&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:600,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+          <div style={{background:'#fff',borderRadius:4,width:'100%',maxWidth:560,boxShadow:'0 8px 32px rgba(0,0,0,0.14)'}}>
+            <div style={{padding:'18px 22px 14px',borderBottom:'1px solid #d6d0c4',display:'flex',justifyContent:'space-between'}}>
+              <div>
+                <div style={{fontSize:10,letterSpacing:'0.12em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:4}}>Add to Board</div>
+                <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:18}}>{analyzeModal.company} — {analyzeModal.title}</h2>
+              </div>
+              <button onClick={()=>{setAnalyzeModal(null);setAnalyzingJob(null);setAnalyzeResult(null);}} style={{background:'none',border:'none',cursor:'pointer',color:'#777'}}><X size={19}/></button>
+            </div>
+            <AnalyzeJDInput excl={analyzeModal} onContinue={handleContinueAddToBoard} onClose={()=>{setAnalyzeModal(null);setAnalyzingJob(null);setAnalyzeResult(null);}}/>
+          </div>
+        </div>
+      )}
+
+
+      {/* HEADER */}
+      <header className="header-inner" style={{background:'#0f0f0f',borderBottom:'3px solid #c8460a',padding:'0 20px',height:64,display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:0,zIndex:200,flexShrink:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:4}}>
+          <div style={{marginRight:10}}>
+            <div style={{fontSize:9,letterSpacing:'0.18em',textTransform:'uppercase',color:'#c8460a',fontWeight:700}}>UX Leadership</div>
+            <div style={{fontFamily:'DM Serif Display,serif',fontSize:15,color:'#f5f2ec',lineHeight:1}}>Job Board</div>
+          </div>
+          <div style={{width:1,height:30,background:'rgba(255,255,255,0.1)',marginRight:6}}/>
+          {([
+            {key:'search',icon:<Search size={15}/>,label:'Search'},
+            {key:'board',icon:<Briefcase size={15}/>,label:`Board${jobs.length>0?` (${jobs.length})`:''}`},
+            {key:'applied',icon:<CheckSquare size={15}/>,label:`Applied${appliedJobs.length>0?` (${appliedJobs.length})`:''}`},
+            {key:'settings',icon:<Settings size={15}/>,label:'Settings'},
+          ] as {key:Tab;icon:React.ReactNode;label:string}[]).map(t=>(
+            <button key={t.key} onClick={()=>setTab(t.key)} style={{background:'none',border:'none',cursor:'pointer',padding:'4px 9px',display:'flex',alignItems:'center',gap:5,fontFamily:'DM Sans,sans-serif',fontSize:13,fontWeight:600,color:tab===t.key?'#f5f2ec':'rgba(255,255,255,0.45)',borderBottom:tab===t.key?'2px solid #c8460a':'2px solid transparent',transition:'all 0.15s',whiteSpace:'nowrap'}}>
+              {t.icon}<span className="nav-label">{t.label}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{display:'flex',gap:6,alignItems:'center'}}>
+          <button onClick={()=>setShowReset(true)} style={{display:'flex',alignItems:'center',gap:4,background:'rgba(200,70,10,0.15)',color:'#f5a580',border:'1px solid rgba(200,70,10,0.3)',borderRadius:4,padding:'6px 10px',fontSize:12,fontWeight:600,cursor:'pointer'}}>
+            <RotateCcw size={12}/><span className="nav-label">Reset</span>
+          </button>
+          <button onClick={()=>setShowHowTo(!showHowTo)} style={{display:'flex',alignItems:'center',gap:4,background:'rgba(255,255,255,0.08)',color:'#f5f2ec',border:'1px solid rgba(255,255,255,0.15)',borderRadius:4,padding:'6px 10px',fontSize:12,fontWeight:600,cursor:'pointer'}}>
+            <HelpCircle size={13}/><span className="nav-label">How to Use</span>
+          </button>
+        </div>
+      </header>
+
+      {/* MAIN CONTENT */}
+      <div style={{flex:1}}>
+
+        {/* SEARCH TAB */}
+        {tab==='search'&&(
+          <main className="main-pad" style={{maxWidth:680,margin:'0 auto',padding:'40px 20px 60px'}}>
+            <div style={{marginBottom:28}}>
+              <div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:8}}>UX Leadership Job Board</div>
+              <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:16,flexWrap:'wrap'}}>
+                <h1 style={{fontFamily:'DM Serif Display,serif',fontSize:30,fontWeight:400,marginBottom:10}}>Find Your Next Role</h1>
+                <button onClick={()=>setShowWizard(true)} style={{display:'flex',alignItems:'center',gap:6,background:'#0f0f0f',color:'#f5f2ec',border:'none',borderRadius:4,padding:'10px 16px',fontSize:13,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0}}>
+                  <Wand2 size={14}/>Launch Guided Experience
+                </button>
+              </div>
+              <p style={{fontSize:14,color:'#7a7469',lineHeight:1.7}}>Upload your resume and cover letter templates, then run a live triple-layer audited job search.</p>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:14,marginBottom:26}}>
+              <UploadCard type="resume" meta={resumeMeta} onUpload={f=>handleUpload(f,'resume')}/>
+              <UploadCard type="cover" meta={coverMeta} onUpload={f=>handleUpload(f,'cover')}/>
+            </div>
+            {searchError&&<div style={{background:'#f5d5c8',color:'#6b2200',padding:'11px 14px',borderRadius:4,marginBottom:18,fontSize:13,display:'flex',gap:8,alignItems:'center'}}><AlertTriangle size={14}/>{searchError}</div>}
+            <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+              <button onClick={runSearch} style={{display:'flex',alignItems:'center',gap:7,background:'#c8460a',color:'#fff',border:'none',borderRadius:4,padding:'12px 26px',fontSize:14,fontWeight:700,cursor:'pointer'}}>
+                <Search size={16}/>Run Job Search
+              </button>
+              {specialInstructions&&<span style={{fontSize:11,background:'#f2e8cb',color:'#b5882e',padding:'3px 10px',borderRadius:3,fontWeight:700}}>Special active</span>}
+              <button onClick={()=>setShowSpecial(true)} style={{display:'flex',alignItems:'center',gap:5,background:'transparent',border:'1.5px solid #d6d0c4',borderRadius:4,padding:'9px 14px',fontSize:13,fontWeight:600,cursor:'pointer',color:'#0f0f0f'}}>
+                <Sparkles size={13}/>Special Instructions
+              </button>
+            </div>
+            <p style={{fontSize:11,color:'#7a7469',marginTop:10}}>~4–6 min · triple-layer audit · edit instructions in Settings</p>
+            <button className="mobile-only" onClick={()=>setShowMobileFAB(true)} style={{position:'fixed',bottom:80,right:24,zIndex:100,width:50,height:50,borderRadius:'50%',background:'#0f0f0f',color:'#fff',border:'none',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 4px 16px rgba(0,0,0,0.3)',cursor:'pointer'}}>
+              <FileText size={20}/>
+            </button>
+          </main>
+        )}
+
+        {/* BOARD TAB */}
+        {tab==='board'&&(
+          <main className="main-pad" style={{maxWidth:1100,margin:'0 auto',padding:'26px 16px 60px'}}>
+            {jobs.length===0?(
+              <div style={{textAlign:'center',padding:'60px 24px',color:'#7a7469'}}>
+                <Briefcase size={44} style={{opacity:0.3,marginBottom:14}}/>
+                <h3 style={{fontFamily:'DM Serif Display,serif',fontSize:21,color:'#0f0f0f',marginBottom:8}}>No jobs loaded yet</h3>
+                <p style={{fontSize:14,lineHeight:1.7,maxWidth:340,margin:'0 auto 22px'}}>Run a job search from the Search tab to populate the board.</p>
+                <button onClick={()=>setTab('search')} style={{padding:'10px 20px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:14}}>Go to Search</button>
+              </div>
+            ):(
+              <>
+                <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
+                  <button onClick={()=>setShowHistory(true)} style={{display:'flex',alignItems:'center',gap:6,padding:'8px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:12}}>
+                    <Clock size={13}/>Saved Searches ({searchHistory.length}/5)
+                  </button>
+                </div>
+                <div style={{background:'#ede9e0',border:'1px solid #d6d0c4',padding:'10px 14px',borderRadius:4,marginBottom:22,display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+                  <Filter size={12} style={{color:'#7a7469',marginRight:2}}/>
+                  {[['all',`All (${jobs.length})`],['senior-director','Sr. Dir'],['director','Director'],['manager','Manager']].map(([val,label])=>(
+                    <button key={val} onClick={()=>setFilterCat(val)} style={{background:filterCat===val?'#0f0f0f':'transparent',color:filterCat===val?'#f5f2ec':'#7a7469',border:`1px solid ${filterCat===val?'#0f0f0f':'#d6d0c4'}`,borderRadius:3,padding:'4px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>{label}</button>
+                  ))}
+                  <button onClick={()=>setFilterRemote(!filterRemote)} style={{background:filterRemote?'#0f0f0f':'transparent',color:filterRemote?'#f5f2ec':'#7a7469',border:`1px solid ${filterRemote?'#0f0f0f':'#d6d0c4'}`,borderRadius:3,padding:'4px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>Remote</button>
+                  <div style={{width:1,height:18,background:'#d6d0c4',margin:'0 2px'}}/>
+                  <SortDesc size={12} style={{color:'#7a7469'}}/>
+                  {[['salary','Salary'],['rating','Rating']].map(([val,label])=>(
+                    <button key={val} onClick={()=>setSortBy(val as 'salary'|'rating')} style={{background:sortBy===val?'#0f0f0f':'transparent',color:sortBy===val?'#f5f2ec':'#7a7469',border:`1px solid ${sortBy===val?'#0f0f0f':'#d6d0c4'}`,borderRadius:3,padding:'4px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>{label}</button>
+                  ))}
+                  <div style={{marginLeft:'auto'}}>
+                    <button onClick={()=>setShowClearBoard(true)} style={{display:'flex',alignItems:'center',gap:4,padding:'4px 10px',border:'1px solid #d6d0c4',borderRadius:3,background:'transparent',cursor:'pointer',fontSize:12,color:'#7a7469'}}><Trash2 size={11}/>Clear</button>
+                  </div>
+                </div>
+                {[{label:'Senior Director',list:srDir},{label:'Director',list:dir},{label:'Manager',list:mgr}].map(section=>section.list.length>0&&(
+                  <section key={section.label} style={{marginBottom:32}}>
+                    <div style={{display:'flex',alignItems:'baseline',gap:10,marginBottom:12,borderBottom:'2px solid #0f0f0f',paddingBottom:7}}>
+                      <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:20}}>{section.label}</h2>
+                      <span style={{fontSize:12,color:'#7a7469'}}>{section.list.length} roles</span>
+                    </div>
+                    <div style={{display:'grid',gap:10}}>
+                      {section.list.map(j=><JobCard key={j.id} job={j} applied={isJobApplied(j.id)} generatingType={generatingJobs[j.id]||null} onGenerate={(job,type)=>setGenerateModal({job,type})} onReturnToExcluded={returnToExcluded}/>)}
+                    </div>
+                  </section>
+                ))}
+                {excludedJobs.length>0&&(
+                  <div style={{marginTop:36,padding:18,background:'#fff8f6',border:'1px solid #e8bead',borderRadius:4}}>
+                    <h3 style={{fontFamily:'DM Serif Display,serif',fontSize:17,fontWeight:400,marginBottom:12,color:'#6b2200',display:'flex',alignItems:'center',gap:7}}>
+                      <AlertTriangle size={16} fill="#c8460a" color="#c8460a"/>Jobs Excluded After Audit ({excludedJobs.length})
+                    </h3>
+                    <div style={{overflowX:'auto'}}>
+                      <table style={{width:'100%',fontSize:12,borderCollapse:'collapse',minWidth:480}}>
+                        <thead><tr style={{textAlign:'left',borderBottom:'1px solid #d6d0c4'}}>
+                          {['Company','Role','Layer Failed','Reason',''].map(h=><th key={h} style={{padding:'5px 10px 5px 0',color:'#7a7469',fontWeight:600}}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>
+                          {excludedJobs.map(j=>(
+                            <tr key={j.id} style={{borderBottom:'1px solid #ede9e0'}}>
+                              <td style={{padding:'7px 10px 7px 0',fontWeight:600}}>{j.company}</td>
+                              <td style={{padding:'7px 10px'}}>{j.title}</td>
+                              <td style={{padding:'7px 10px'}}>{j.layerFailed}</td>
+                              <td style={{padding:'7px 10px',color:'#c8460a'}}>{j.reason}</td>
+                              <td style={{padding:'7px 0'}}>
+                                <button onClick={()=>openAddToBoard(j)} style={{display:'flex',alignItems:'center',gap:4,padding:'5px 10px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:3,cursor:'pointer',fontSize:11,fontWeight:700,whiteSpace:'nowrap'}}>
+                                  <PlusCircle size={11}/>Add to Board
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </main>
+        )}
+
+        {/* APPLIED TAB */}
+        {tab==='applied'&&(
+          <main className="main-pad" style={{maxWidth:840,margin:'0 auto',padding:'40px 16px 60px'}}>
+            <div style={{display:'flex',alignItems:'flex-end',justifyContent:'space-between',marginBottom:26,gap:14,flexWrap:'wrap'}}>
+              <div>
+                <div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:7}}>Application Tracker</div>
+                <h1 style={{fontFamily:'DM Serif Display,serif',fontSize:27,fontWeight:400}}>Applied Jobs</h1>
+              </div>
+              {appliedJobs.length>0&&<button onClick={()=>{if(confirm('Clear all applied jobs?')){clearAppliedJobs();setAppliedJobs([]);}}} style={{display:'flex',alignItems:'center',gap:5,padding:'7px 13px',background:'transparent',color:'#c8460a',border:'1.5px solid #f5d5c8',borderRadius:4,cursor:'pointer',fontSize:13,fontWeight:600}}><Trash2 size={13}/>Clear All</button>}
+            </div>
+            {appliedJobs.length===0?(
+              <div style={{textAlign:'center',padding:'60px 24px',color:'#7a7469'}}>
+                <CheckSquare size={44} style={{opacity:0.3,marginBottom:14}}/>
+                <h3 style={{fontFamily:'DM Serif Display,serif',fontSize:21,color:'#0f0f0f',marginBottom:8}}>No applications yet</h3>
+                <p style={{fontSize:14,lineHeight:1.7,maxWidth:340,margin:'0 auto'}}>Generating any document marks a job as Applied here automatically.</p>
+              </div>
+            ):(
+              <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                {appliedJobs.map(job=>(
+                  <div key={job.id} style={{background:'#fff',border:'1px solid #d6d0c4',borderRadius:4,padding:'16px 18px'}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,flexWrap:'wrap'}}>
+                      <div style={{flex:1,minWidth:180}}>
+                        <div style={{fontSize:11,letterSpacing:'0.1em',textTransform:'uppercase',fontWeight:700,color:'#c8460a',marginBottom:3}}>{job.company}</div>
+                        <div style={{fontFamily:'DM Serif Display,serif',fontSize:16,marginBottom:9}}>{job.title}</div>
+                        <div style={{display:'flex',flexWrap:'wrap',gap:5,alignItems:'center',marginBottom:9}}>
+                          {(job.statusHistory||[]).map((s,i)=>(
+                            <div key={i} style={{display:'flex',alignItems:'center',gap:4}}>
+                              {i>0&&<ArrowRight size={9} color="#d6d0c4"/>}
+                              <span style={{background:statusBg(s.status),color:statusColor(s.status),fontSize:10,fontWeight:700,letterSpacing:'0.06em',textTransform:'uppercase',padding:'2px 7px',borderRadius:3}}>{s.status}</span>
+                              <span style={{fontSize:10,color:'#7a7469'}}>{new Date(s.date).toLocaleDateString('en-US',{month:'short',day:'numeric'})}{s.note&&` · ${s.note}`}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
+                          {job.resumeGenerated&&<span style={{fontSize:10,background:'#dde8f5',color:'#1a4fd8',padding:'2px 7px',borderRadius:3,fontWeight:700,display:'flex',alignItems:'center',gap:3}}><FileText size={10} fill="#1a4fd8"/>Resume</span>}
+                          {job.coverLetterGenerated&&<span style={{fontSize:10,background:'#f3e8ff',color:'#6b21a8',padding:'2px 7px',borderRadius:3,fontWeight:700,display:'flex',alignItems:'center',gap:3}}><Mail size={10} fill="#6b21a8"/>Cover Letter</span>}
+                        </div>
+                      </div>
+                      <div style={{display:'flex',flexDirection:'column',gap:7,alignItems:'flex-end'}}>
+                        <div style={{fontSize:11,color:'#7a7469',display:'flex',alignItems:'center',gap:4}}><Clock size={11}/>{new Date(job.appliedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>
+                        <div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
+                          <button onClick={()=>setAddStatusModal(job.id)} style={{display:'flex',alignItems:'center',gap:4,padding:'5px 10px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontSize:12,fontWeight:600}}><Plus size={11}/>Status</button>
+                          {job.applyUrl&&<a href={job.applyUrl} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',padding:'5px 9px',border:'1.5px solid #d6d0c4',borderRadius:4,fontSize:12,fontWeight:600,textDecoration:'none',color:'#0f0f0f'}}><ExternalLink size={12}/></a>}
+                          <button onClick={()=>{if(confirm(`Remove ${job.company}?`)){deleteAppliedJob(job.id);setAppliedJobs(getAppliedJobs());}}} style={{display:'flex',alignItems:'center',padding:'5px 9px',border:'1.5px solid #f5d5c8',borderRadius:4,background:'transparent',cursor:'pointer',color:'#c8460a'}}><Trash2 size={12}/></button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </main>
+        )}
+
+        {/* SETTINGS TAB */}
+        {tab==='settings'&&(
+          <main className="main-pad" style={{maxWidth:800,margin:'0 auto',padding:'40px 16px 60px'}}>
+            <div style={{marginBottom:28}}>
+              <div style={{fontSize:10,letterSpacing:'0.15em',textTransform:'uppercase',color:'#c8460a',fontWeight:700,marginBottom:7}}>Configuration</div>
+              <h1 style={{fontFamily:'DM Serif Display,serif',fontSize:27,fontWeight:400}}>Settings</h1>
+            </div>
+
+            {/* Profile summary */}
+            <section style={{background:'#fff',border:'1px solid #d6d0c4',borderRadius:4,padding:22,marginBottom:20}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14,flexWrap:'wrap',gap:10}}>
+                <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:19,display:'flex',alignItems:'center',gap:7}}><User size={17}/>Candidate Profile</h2>
+                <button onClick={()=>setShowWizard(true)} style={{display:'flex',alignItems:'center',gap:5,padding:'7px 14px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13}}><Wand2 size={13}/>Re-run Wizard</button>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:10,fontSize:13,color:'#3a3730'}}>
+                <div><span style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.1em',color:'#7a7469',display:'block',marginBottom:3}}>Name</span>{profile.name||'—'}</div>
+                <div><span style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.1em',color:'#7a7469',display:'block',marginBottom:3}}>Most Recent Role</span>{profile.mostRecentRole||'—'} at {profile.mostRecentEmployer||'—'}</div>
+                <div><span style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.1em',color:'#7a7469',display:'block',marginBottom:3}}>Salary Target</span>{fmtSalary(profile.salaryMin)} – {fmtSalary(profile.salaryMax)}</div>
+                <div><span style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.1em',color:'#7a7469',display:'block',marginBottom:3}}>Work Preference</span>{profile.workTypes.join(', ')}</div>
+                <div><span style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.1em',color:'#7a7469',display:'block',marginBottom:3}}>Links</span>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                    {profile.linkedinUrl&&<a href={`https://${profile.linkedinUrl}`} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',gap:3,fontSize:11,color:'#1a4fd8',textDecoration:'none'}}><Link size={10}/>LinkedIn</a>}
+                    {profile.portfolioUrl&&<a href={`https://${profile.portfolioUrl}`} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',gap:3,fontSize:11,color:'#1a4fd8',textDecoration:'none'}}><Link size={10}/>Portfolio</a>}
+                    {(profile.additionalLinks||[]).map(l=><a key={l.title} href={l.url} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',gap:3,fontSize:11,color:'#1a4fd8',textDecoration:'none'}}><Link size={10}/>{l.title}</a>)}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* API Keys */}
+            <section style={{background:'#fff',border:'1px solid #d6d0c4',borderRadius:4,padding:22,marginBottom:20}}>
+              <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:19,marginBottom:5,display:'flex',alignItems:'center',gap:7}}><Settings size={17}/>API Keys</h2>
+              <p style={{fontSize:13,color:'#7a7469',marginBottom:16,lineHeight:1.7}}>
+                Stored in browser. UI keys override Vercel env vars.&nbsp;
+                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" style={{color:'#1a4fd8'}}>Get Anthropic key ↗</a>&nbsp;·&nbsp;
+                <a href="https://serper.dev/api-key" target="_blank" rel="noreferrer" style={{color:'#1a4fd8'}}>Get Serper key ↗</a>
+              </p>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:12,marginBottom:14}}>
+                <div>
+                  <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:5}}>Anthropic API Key</div>
+                  <input type="password" value={anthropicKey} onChange={e=>setAnthropicKey(e.target.value)} placeholder="sk-ant-..." style={{width:'100%',padding:'8px 11px',border:'1.5px solid #d6d0c4',borderRadius:4,fontFamily:'DM Sans,sans-serif',fontSize:13,outline:'none'}}/>
+                </div>
+                <div>
+                  <div style={{fontSize:10,fontWeight:700,letterSpacing:'0.15em',textTransform:'uppercase',color:'#7a7469',marginBottom:5}}>Serper API Key</div>
+                  <input type="password" value={serperKey} onChange={e=>setSerperKey(e.target.value)} placeholder="Serper key..." style={{width:'100%',padding:'8px 11px',border:'1.5px solid #d6d0c4',borderRadius:4,fontFamily:'DM Sans,sans-serif',fontSize:13,outline:'none'}}/>
+                </div>
+              </div>
+              <button onClick={()=>{setLocalApiKey(anthropicKey);setLocalSerperKey(serperKey);setKeysSaved(true);setTimeout(()=>setKeysSaved(false),2000);}} style={{display:'flex',alignItems:'center',gap:5,padding:'8px 16px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:600,fontSize:13}}>
+                {keysSaved?<><CheckCircle size={13} fill="#fff"/>Saved</>:<><CheckSquare size={13}/>Save Keys</>}
+              </button>
+            </section>
+
+            {/* Instructions */}
+            {([
+              {key:'jobSearch' as const,label:'Job Search Instructions',icon:<Search size={16}/>},
+              {key:'resume' as const,label:'Resume Generation Instructions',icon:<FileText size={16}/>},
+              {key:'coverLetter' as const,label:'Cover Letter Instructions',icon:<Mail size={16}/>},
+            ]).map(({key,label,icon})=>{
+              const value=key==='jobSearch'?jobSearchInstr:key==='resume'?resumeInstr:coverInstr;
+              const setter=key==='jobSearch'?setJobSearchInstr:key==='resume'?setResumeInstr:setCoverInstr;
+              return (
+                <section key={key} style={{background:'#fff',border:'1px solid #d6d0c4',borderRadius:4,padding:22,marginBottom:16}}>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12,flexWrap:'wrap',gap:8}}>
+                    <h2 style={{fontFamily:'DM Serif Display,serif',fontSize:18,display:'flex',alignItems:'center',gap:7}}>{icon}{label}</h2>
+                    <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
+                      <button onClick={()=>setResetInstrTarget(key)} style={{display:'flex',alignItems:'center',gap:5,padding:'6px 11px',background:'transparent',color:'#c8460a',border:'1.5px solid #f5d5c8',borderRadius:4,cursor:'pointer',fontSize:12,fontWeight:600}}><RotateCcw size={12}/>Reset</button>
+                      <button onClick={()=>copyInstrs(key)} style={{display:'flex',alignItems:'center',gap:5,padding:'6px 11px',border:'1.5px solid #d6d0c4',borderRadius:4,background:'transparent',cursor:'pointer',fontSize:12,fontWeight:600}}>
+                        {copied===key?<><CheckCircle size={12}/>Copied!</>:<><Copy size={12}/>Copy</>}
+                      </button>
+                      <button onClick={()=>saveInstrs(key)} style={{display:'flex',alignItems:'center',gap:5,padding:'6px 12px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontSize:12,fontWeight:600}}>
+                        {instrSaved===key?<><CheckCircle size={12} fill="#fff"/>Saved</>:<><CheckSquare size={12}/>Save</>}
+                      </button>
+                    </div>
+                  </div>
+                  <textarea value={value} onChange={e=>setter(e.target.value)} rows={10}
+                    style={{width:'100%',padding:'9px 11px',border:'1.5px solid #d6d0c4',borderRadius:4,fontFamily:'monospace',fontSize:12,resize:'vertical',outline:'none'}}/>
+                  <p style={{fontSize:11,color:'#7a7469',marginTop:5}}>Save writes to localStorage. "Copy" copies to clipboard for manual repo update.</p>
+                </section>
+              );
+            })}
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginTop:8}}>
+              <button onClick={()=>setShowSaveImport(true)} style={{display:'flex',alignItems:'center',gap:6,padding:'10px 18px',background:'#0f0f0f',color:'#fff',border:'none',borderRadius:4,cursor:'pointer',fontWeight:700,fontSize:13}}>
+                <Upload size={14}/>Save / Import Job Board
+              </button>
+              <button onClick={()=>{const p=getSavedProfile()||DEFAULT_PROFILE;const js=buildJobSearchInstructions(p);const res=buildResumeInstructions(p);const cv=buildCoverLetterInstructions(p);setJobSearchInstr(js);setResumeInstr(res);setCoverInstr(cv);saveInstructions({jobSearch:js,resume:res,coverLetter:cv});}} style={{display:'flex',alignItems:'center',gap:5,padding:'9px 14px',background:'transparent',color:'#c8460a',border:'1.5px solid #f5d5c8',borderRadius:4,cursor:'pointer',fontSize:13,fontWeight:600}}>
+                <RotateCcw size={13}/>Reset Instructions to Defaults
+              </button>
+            </div>
+          </main>
+        )}
+      </div>
+
+      {/* STICKY FOOTER */}
+      <footer style={{background:'#0f0f0f',color:'#7a7469',textAlign:'center',padding:'14px 20px',fontSize:11,display:'flex',alignItems:'center',justifyContent:'center',gap:6,position:'sticky',bottom:0,zIndex:100,flexShrink:0,flexWrap:'wrap'}}>
+        <Copyright size={11}/>
+        <span>{new Date().getFullYear()} Ape X LLC</span>
+        <span>·</span>
+        {profile.portfolioUrl&&<><a href={`https://${profile.portfolioUrl}`} target="_blank" rel="noreferrer" style={{color:'#c8460a',textDecoration:'none'}}>{profile.portfolioUrl}</a><span>·</span></>}
+        {profile.linkedinUrl&&<a href={`https://${profile.linkedinUrl}`} target="_blank" rel="noreferrer" style={{color:'#c8460a',textDecoration:'none'}}>LinkedIn</a>}
+        <span>·</span>
+        <button onClick={()=>setShowTerms(true)} style={{background:'none',border:'none',cursor:'pointer',color:'#7a7469',fontSize:11,padding:0,textDecoration:'underline'}}>Terms &amp; Conditions</button>
+      </footer>
+    </div>
+  );
+}
