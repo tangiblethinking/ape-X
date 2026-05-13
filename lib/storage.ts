@@ -342,7 +342,7 @@ export function importAppData(exported: AppExport): void {
   Object.entries(exported.data).forEach(([key, value]) => {
     if (ALL_KEYS.includes(key)) localStorage.setItem(key, value);
   });
-}$
+}
 // ── Wizard Seen ─────────────────────────────────────────────
 const WIZARD_SEEN_KEY = 'uxjb_wizard_seen';
 
