@@ -47,6 +47,21 @@ interface ExcludedJob {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+// Safe JSON parse for fetch responses — prevents "Unexpected token '<'" when
+// the server returns an HTML error page instead of JSON (e.g. 404 on missing route)
+async function safeJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Server returned HTML (error page) — surface a useful message
+    const status = res.status;
+    if (status === 404) return { error: `API route not found (${res.url.split('/api/')[1] ?? res.url})` };
+    return { error: `Server error (${status}): unexpected response format` };
+  }
+}
+
 function readyTime(mins: number): string {
   const d = new Date(Date.now() + mins * 60000);
   let h = d.getHours(), m = d.getMinutes();
@@ -308,8 +323,9 @@ function SetupWizard({initialProfile,initialAnthropicKey,initialSerperKey,onComp
         body:JSON.stringify({resumeText:text,apiKeyOverride:wizAnthropicKey}),
       });
       if(res.ok){
-        const data=await res.json();
-        const ex=data.profile||{};
+        const data=await safeJson(res);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ex: any =(data.profile as Record<string,unknown>)||{};
         const found=new Set<string>();
         // Map all extracted fields, track which ones were populated
         setProfile(p=>{
@@ -1002,9 +1018,9 @@ function GenerateModal({job,type,onClose,instructions,apiKey}:{
           type,jobData:job,jobDescription:jd,instructions,apiKeyOverride:apiKey,
           uploadedTemplate:type==='resume'?getUploadedResume():getUploadedCover(),
         })});
-      const data=await res.json();
-      if(!res.ok){setError(data.error||'Generation failed.');return;}
-      setHtml(data.html);
+      const data=await safeJson(res);
+      if(!res.ok){setError((data.error as string)||'Generation failed.');return;}
+      setHtml(data.html as string);
       markDocGenerated(job.id,type,{company:job.company,title:job.title,jobDescUrl:job.jobDescUrl,applyUrl:job.applyUrl});
     }catch(e:unknown){setError(e instanceof Error?e.message:'Unknown error');}
     finally{setLoading(false);}
@@ -1581,9 +1597,9 @@ export default function Home() {
       const res1=await fetch('/api/search-pass1',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({instructions:jobSearchInstr,specialInstructions,apiKeyOverride:anthropicKey,serperKeyOverride:serperKey})});
       if(abortRef.current) return;
-      const data1=await res1.json();
-      if(!res1.ok){setSearchError(data1.error||'Search failed in Pass 1.');setSearching(false);return;}
-      if(data1.error==='no_results'){setSearchError(data1.message||'No results found.');setSearching(false);return;}
+      const data1=await safeJson(res1);
+      if(!res1.ok){setSearchError((data1.error as string)||'Search failed in Pass 1.');setSearching(false);return;}
+      if(data1.error==='no_results'){setSearchError((data1.message as string)||'No results found.');setSearching(false);return;}
 
       // Pass 2 — verify and build job cards
       setSearchPhase(2);
@@ -1598,11 +1614,11 @@ export default function Home() {
           titlesSearched:data1.titlesSearched||[],
         })});
       if(abortRef.current) return;
-      const data2=await res2.json();
-      if(!res2.ok){setSearchError(data2.error||'Search failed in Pass 2.');setSearching(false);return;}
+      const data2=await safeJson(res2);
+      if(!res2.ok){setSearchError((data2.error as string)||'Search failed in Pass 2.');setSearching(false);return;}
 
-      const live=(data2.jobs||[]).filter((j:SavedJob|ExcludedJob)=>!j.excluded) as SavedJob[];
-      const excl=(data2.jobs||[]).filter((j:SavedJob|ExcludedJob)=>j.excluded) as ExcludedJob[];
+      const live=((data2.jobs as (SavedJob|ExcludedJob)[])||[]).filter((j:SavedJob|ExcludedJob)=>!j.excluded) as SavedJob[];
+      const excl=((data2.jobs as (SavedJob|ExcludedJob)[])||[]).filter((j:SavedJob|ExcludedJob)=>j.excluded) as ExcludedJob[];
       setJobs(live);setExcludedJobs(excl);setSavedJobs(live);
       setLastSearchQuery(jobSearchInstr);
 
@@ -1660,7 +1676,7 @@ export default function Home() {
         applyUrl:excl.applyUrl,jobDescUrl:excl.jobDescUrl,careersUrl:excl.careersUrl,
         candidateProfile:profile,jdText:'',apiKeyOverride:anthropicKey,
       }),
-    }).then(r=>r.json()).then(data=>{
+    }).then(r=>safeJson(r)).then(data=>{
       analyzeResultRef.current=data;
       setAnalyzeResult(data);
       setAnalyzingJob(null);
