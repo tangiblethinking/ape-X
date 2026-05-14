@@ -1805,11 +1805,21 @@ export default function Home() {
   };
 
   const onWizardComplete=(p:CandidateProfile,anthKey:string,serpKey:string)=>{
+    // Persist keys to localStorage so they survive reload
+    setLocalApiKey(anthKey);
+    setLocalSerperKey(serpKey);
+    // Build and persist instructions
+    const js=buildJobSearchInstructions(p);
+    const res=buildResumeInstructions(p);
+    const cv=buildCoverLetterInstructions(p);
+    saveInstructions({jobSearch:js,resume:res,coverLetter:cv});
+    // Update React state
     setProfile(p);
     setAnthropicKey(anthKey); setSerperKey(serpKey);
-    setJobSearchInstr(buildJobSearchInstructions(p));
-    setResumeInstr(buildResumeInstructions(p));
-    setCoverInstr(buildCoverLetterInstructions(p));
+    setJobSearchInstr(js);
+    setResumeInstr(res);
+    setCoverInstr(cv);
+    setWizardSeen();
     setShowWizard(false);setShowSuccess(true);
   };
 
@@ -2045,7 +2055,7 @@ export default function Home() {
             )}
 
             {/* Soft warn — missing titles */}
-            {anthropicKey&&serperKey&&(!profile.targetTitles.length||jobSearchInstr.includes('[Complete'))&&(
+            {anthropicKey&&serperKey&&profile.targetTitles.length===0&&(
               <div style={{background:'#f2e8cb',border:'1px solid #e8d5a0',borderRadius:4,padding:'10px 14px',marginBottom:14,fontSize:12,color:'#7a5a1a',display:'flex',alignItems:'center',gap:8}}>
                 <AlertTriangle size={13} color="#b5882e"/>
                 No job titles configured — search may return broad results.{' '}

@@ -1,5 +1,32 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 
+// ── JSON repair: close unclosed arrays/objects from truncated Claude output ──
+function repairJson(raw: string): string {
+  let s = raw.trim();
+  s = s.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  const arrayStart = s.indexOf('[');
+  if (arrayStart === -1) return '[]';
+  s = s.slice(arrayStart);
+  let depth = 0, inString = false, escaped = false, lastCompleteObjectEnd = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\' && inString) { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') depth++;
+    if (ch === '}' || ch === ']') { depth--; if (depth === 1) lastCompleteObjectEnd = i; }
+  }
+  try { JSON.parse(s); return s; } catch { /* needs repair */ }
+  if (lastCompleteObjectEnd > 0) {
+    let truncated = s.slice(0, lastCompleteObjectEnd + 1).trim();
+    truncated = truncated.replace(/,\s*$/, '');
+    return truncated + ']';
+  }
+  return '[]';
+}
+
+
 // Extract target titles from instruction text
 function extractTitles(instructions: string): string[] {
   const match = instructions.match(/TARGET TITLES:\s*(.+)/);
@@ -109,8 +136,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 8192,
+        model: 'claude-sonnet-4-5-20250514',
+        max_tokens: 16000,
         system: `${finalInstructions}
 
 IMPORTANT: You have been given real search results from Google. Your job is to:
@@ -155,10 +182,10 @@ Prioritize results that match these exact titles or very close variants.`,
     try {
       jobs = JSON.parse(cleaned);
     } catch {
-      const match = cleaned.match(/\[[\s\S]*\]/);
-      if (match) {
-        jobs = JSON.parse(match[0]);
-      } else {
+      try {
+        const repaired = repairJson(rawText);
+        jobs = JSON.parse(repaired);
+      } catch {
         return res.status(500).json({ error: 'Failed to parse job results. Try again.' });
       }
     }

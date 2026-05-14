@@ -21,6 +21,52 @@ interface VerifiedAggregator extends AggregatorResult {
   verified: boolean;
 }
 
+// ── JSON repair: close unclosed arrays/objects from truncated Claude output ──
+function repairJson(raw: string): string {
+  let s = raw.trim();
+  // Strip any markdown fences
+  s = s.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+  // Find the outermost array
+  const arrayStart = s.indexOf('[');
+  if (arrayStart === -1) return '[]';
+  s = s.slice(arrayStart);
+
+  // Count open braces/brackets to determine what needs closing
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let lastCompleteObjectEnd = -1;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\' && inString) { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') depth++;
+    if (ch === '}' || ch === ']') {
+      depth--;
+      // Track last position where we're back at depth=1 (inside the outer array but between objects)
+      if (depth === 1) lastCompleteObjectEnd = i;
+    }
+  }
+
+  // If JSON parsed cleanly, return as-is
+  try { JSON.parse(s); return s; } catch { /* needs repair */ }
+
+  // Truncate to last complete object, then close the array
+  if (lastCompleteObjectEnd > 0) {
+    let truncated = s.slice(0, lastCompleteObjectEnd + 1).trim();
+    // Remove trailing comma if present
+    truncated = truncated.replace(/,\s*$/, '');
+    return truncated + ']';
+  }
+
+  // Last resort: empty array
+  return '[]';
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
@@ -42,7 +88,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
-  // Pass 2: verify every aggregator result — no cap
+  // Pass 2: verify every aggregator result
   const verifiedAggregators: VerifiedAggregator[] = [];
 
   for (const agg of (aggregators as AggregatorResult[])) {
@@ -63,7 +109,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         const data = await serperRes.json();
         const results = (data.organic || []) as { link: string; title: string }[];
 
-        // Check if any result is on the company's own domain (not an aggregator)
         const aggregatorDomains = ['linkedin.com', 'indeed.com', 'ziprecruiter.com', 'glassdoor.com',
           'monster.com', 'careerbuilder.com', 'dice.com', 'builtin.com', 'simplyhired.com',
           'snagajob.com', 'flexjobs.com', 'talent.com', 'google.com'];
@@ -88,27 +133,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
   }
 
-  // Build combined results text for Claude Pass 2
+  // Build compact results text for Claude
   const trustedText = (trusted as TrustedResult[]).map(r =>
-    `[TRUSTED - ${r.source.toUpperCase()}]\nTitle: ${r.title}\nCompany: ${r.company}\nURL: ${r.url}\nSnippet: ${r.snippet}\nAudit: ✓ Direct ATS Verified`
-  ).join('\n\n');
+    `[ATS]${r.company}|${r.title}|${r.url}|${r.snippet}`
+  ).join('\n');
 
   const verifiedAggText = verifiedAggregators.filter(r => r.verified).map(r =>
-    `[AGGREGATOR - VERIFIED]\nTitle: ${r.title}\nCompany: ${r.company}\nOriginal URL: ${r.aggregator_url}\nVerified Company URL: ${r.verified_url}\nSnippet: ${r.snippet}\nAudit: ✓ Company Domain Verified`
-  ).join('\n\n');
+    `[AGG-V]${r.company}|${r.title}|${r.verified_url}|${r.snippet}`
+  ).join('\n');
 
   const unverifiedAggText = verifiedAggregators.filter(r => !r.verified).map(r =>
-    `[AGGREGATOR - UNVERIFIED]\nTitle: ${r.title}\nCompany: ${r.company}\nURL: ${r.aggregator_url}\nSnippet: ${r.snippet}\nAudit: ✓ Aggregator Listed`
-  ).join('\n\n');
+    `[AGG-U]${r.company}|${r.title}|${r.aggregator_url}|${r.snippet}`
+  ).join('\n');
 
-  const allResultsText = [
-    trustedText && `=== DIRECT ATS / COMPANY DOMAIN ===\n${trustedText}`,
-    verifiedAggText && `=== VERIFIED COMPANY DOMAIN (from aggregator) ===\n${verifiedAggText}`,
-    unverifiedAggText && `=== AGGREGATOR LISTED (unverified) ===\n${unverifiedAggText}`,
-  ].filter(Boolean).join('\n\n========\n\n');
+  const allResultsText = [trustedText, verifiedAggText, unverifiedAggText].filter(Boolean).join('\n');
 
   const finalInstructions = specialInstructions
-    ? `${instructions}\n\nSPECIAL INSTRUCTIONS:\n${specialInstructions}`
+    ? `${instructions}\n\nSPECIAL:\n${specialInstructions}`
     : instructions;
 
   try {
@@ -120,72 +161,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 8192,
+        model: 'claude-sonnet-4-5-20250514',
+        max_tokens: 16000,
         system: `${finalInstructions}
 
-TODAY: ${today}
-TITLES SEARCHED: ${(titlesSearched || []).join(', ')}
+TODAY:${today} TITLES:${(titlesSearched || []).join(',')}
 
-You are building job cards from verified search results. URL verification has already been completed by the search system.
+Build job cards from verified search results. Return ONLY a compact JSON array (no whitespace, no markdown).
 
-Your ONLY responsibility is Layer 3: assess each role for fit against the candidate profile and build complete job cards.
+Each active job object:
+{"id":"slug","company":"Co","title":"Title","category":"seniority","isRemote":true,"isHybrid":false,"isOnsite":false,"location":"City ST","industry":["sector"],"salaryMin":0,"salaryMax":0,"salaryDisplay":"$0 — Not Listed","salaryNote":"Not Listed","rating":7,"auditLabel":"✓ Direct ATS Verified ${today}","roleSummary":"2-3 sentences","whyYouFit":["bullet"],"requirements":["req"],"companyInfo":"2-3 sentences","goldFlags":["flag"],"redFlags":["flag"],"applyUrl":"url","careersUrl":"url","aboutUrl":"url","jobDescUrl":"url","postedDate":"YYYY-MM-DD","excluded":false}
 
-LOCATION: Read the Location field from these instructions and interpret it fully — handle any format (full state name, abbreviation, city name, mixed case) — no assumptions about format.
+Excluded job object:
+{"id":"slug","company":"Co","title":"Title","layerFailed":"Layer 3","reason":"reason","excluded":true}
 
-CATEGORY: Use the actual seniority level of the role as it appears — e.g. "Entry", "Mid", "Senior", "Lead", "Manager", "Director", "VP", "C-Suite", "Executive". Do not force into any predefined list.
+auditLabel: use "✓ Direct ATS Verified" for [ATS], "✓ Company Domain Verified" for [AGG-V], "✓ Aggregator Listed" for [AGG-U] — append date.
+Rating: 9-10=near-perfect, 7-8=strong with gap, 5-6=solid fundamentals, below 5=exclude.
+LOCATION: parse any format (full state, abbreviation, city, mixed case).
+CATEGORY: use actual seniority from role title.
 
-Return ONLY a valid JSON array. Each job object must have:
-{
-  "id": "unique-slug",
-  "company": "Company Name",
-  "title": "Exact Job Title",
-  "category": "seniority level string",
-  "isRemote": true|false,
-  "isHybrid": true|false,
-  "isOnsite": true|false,
-  "location": "City, ST — for hybrid/onsite only, empty string for remote",
-  "industry": ["sector1", "sector2"],
-  "salaryMin": 0,
-  "salaryMax": 0,
-  "salaryDisplay": "$0 — Not Listed",
-  "salaryNote": "Posted|Estimated|Not Listed",
-  "rating": 7,
-  "auditLabel": "use exactly one of: '✓ Direct ATS Verified' or '✓ Company Domain Verified' or '✓ Aggregator Listed' — then append the date like: '✓ Direct ATS Verified May 12 2026'",
-  "roleSummary": "2-3 sentence summary",
-  "whyYouFit": ["bullet based on candidate profile"],
-  "requirements": ["requirement from posting"],
-  "companyInfo": "2-3 sentences about company",
-  "goldFlags": ["positive signal"],
-  "redFlags": ["concern if any"],
-  "applyUrl": "best available apply URL",
-  "careersUrl": "company careers page if known",
-  "aboutUrl": "company about page if known",
-  "jobDescUrl": "job description URL",
-  "postedDate": "YYYY-MM-DD or empty string",
-  "excluded": false
-}
-
-Also include excluded jobs (failed Layer 3 or insufficient data):
-{
-  "id": "slug",
-  "company": "Company",
-  "title": "Title",
-  "layerFailed": "Layer 3",
-  "reason": "specific reason",
-  "excluded": true
-}
-
-FIT RATING:
-9-10 = Near-perfect match across title, industry, scope, and candidate profile
-7-8  = Strong match with one bridgeable gap
-5-6  = Solid fundamentals, notable gaps
-Below 5 = Exclude
-
-Return ONLY valid JSON array. No markdown, no explanation.`,
+Return ONLY the JSON array. No explanation. No markdown.`,
         messages: [{
           role: 'user',
-          content: `Build job cards from these verified results:\n\n${allResultsText}`,
+          content: `Format: [TYPE]Company|Title|URL|Snippet\n\n${allResultsText}`,
         }],
       }),
     });
@@ -197,17 +195,18 @@ Return ONLY valid JSON array. No markdown, no explanation.`,
 
     const claudeData = await claudeRes.json();
     const raw = claudeData.content?.[0]?.text || '[]';
-    const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
     let jobs;
     try {
+      const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       jobs = JSON.parse(cleaned);
     } catch {
-      const match = cleaned.match(/\[[\s\S]*\]/);
-      if (match) {
-        jobs = JSON.parse(match[0]);
-      } else {
-        return res.status(500).json({ error: 'Failed to parse job results from Pass 2.' });
+      // Try repair
+      try {
+        const repaired = repairJson(raw);
+        jobs = JSON.parse(repaired);
+      } catch {
+        return res.status(500).json({ error: `Failed to parse job results from Pass 2. Raw length: ${raw.length}` });
       }
     }
 

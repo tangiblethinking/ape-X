@@ -41,8 +41,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2000,
+        model: 'claude-sonnet-4-5-20250514',
+        max_tokens: 4000,
         system: `You are a recruiter analyst. Generate a complete job card analysis for the role described.
 The candidate profile is: ${profileStr}
 

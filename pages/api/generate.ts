@@ -70,8 +70,8 @@ Generate the complete tailored HTML. Return only the HTML document.`;
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 8000,
+        model: 'claude-sonnet-4-5-20250514',
+        max_tokens: 16000,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }],
       }),
